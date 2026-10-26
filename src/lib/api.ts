@@ -17,5 +17,5 @@ export type Service = { id: string; name: string; description: string; duration_
 export type Settings = { open_time: string; close_time: string; working_days: number[]; slot_step_min: number; min_notice_min: number; max_days_ahead: number; modes: Mode[]; office_address: string };
 export type Mode = 'office' | 'meet' | 'phone';
 export type OffDay = { id: string; from_date: string; to_date: string; reason: string };
-export type PublicConfig = { today: string; settings: Settings; services: Service[]; referrers: { code: string; name: string }[]; off_days: OffDay[]; calendar_connected: boolean };
+export type PublicConfig = { today: string; settings: Settings; services: Service[]; referrers: { code: string; name: string }[]; off_days: OffDay[]; calendar_connected: boolean; other_duration_min?: number };
 export type PublicBooking = { id: string; service_name: string; duration_min: number; mode: Mode; mode_label: string; start_at: string; end_at: string; when_label: string; status: string; client_name: string; meet_link: string | null; office_address: string; can_cancel: boolean };

@@ -6,7 +6,7 @@
 // Optional: TURNSTILE_SECRET_KEY (secret) to block spam bookings.
 // Cron Trigger: * * * * * (every minute) for calendar retries, reminders and emails.
 
-const REVISION = 'appointments-1';
+const REVISION = 'appointments-2';
 const ZONE = 'Asia/Dhaka';
 const OFFSET = '+06:00'; // Bangladesh has no daylight saving time.
 const ACTIVE = ['calendar_pending', 'confirmed'];
@@ -16,6 +16,8 @@ const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
 const EMAIL = /^[^\s@,()"]+@[^\s@,()"]+\.[^\s@,()"]+$/;
 const MAX_UPCOMING_PER_CLIENT = 3;
+const OTHER_SERVICE_ID = 'other';   // client types their own service
+const OTHER_DURATION_MIN = 30;
 const GOOGLE_SCOPES = 'openid email https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/calendar.freebusy';
 
 class ApiError extends Error {
@@ -364,14 +366,17 @@ async function publicConfig(env) {
       slot_step_min: settings.slot_step_min, min_notice_min: settings.min_notice_min, max_days_ahead: settings.max_days_ahead,
       modes: settings.modes, office_address: settings.office_address },
     services, referrers: referrers.map(r => ({ code: r.code, name: r.full_name })),
-    off_days: await futureOffDays(env, today), calendar_connected: !!google.refresh_token_enc,
+    off_days: await futureOffDays(env, today), calendar_connected: !!google.refresh_token_enc, other_duration_min: OTHER_DURATION_MIN,
   };
 }
 async function slotsFor(env, date, serviceId) {
   if (!DATE.test(date || '')) fail(400, 'INVALID_INPUT', 'Choose a valid date.');
-  if (!UUID.test(serviceId || '')) fail(400, 'INVALID_INPUT', 'Choose a service.');
+  if (serviceId !== OTHER_SERVICE_ID && !UUID.test(serviceId || '')) fail(400, 'INVALID_INPUT', 'Choose a service.');
   const [settings, [service], offDays] = await Promise.all([
-    loadSettings(env), db(env, `appt_services?id=eq.${serviceId}&active=is.true&select=*`), futureOffDays(env, date),
+    loadSettings(env),
+    serviceId === OTHER_SERVICE_ID ? [{ id: null, name: 'Other', duration_min: OTHER_DURATION_MIN }]
+      : db(env, `appt_services?id=eq.${serviceId}&active=is.true&select=*`),
+    futureOffDays(env, date),
   ]);
   if (!service) fail(404, 'SERVICE_NOT_FOUND', 'This service is not available.');
   const from = at(date, '00:00'), to = from + 86400e3;
@@ -412,7 +417,9 @@ async function createBooking(request, env, ctx) {
 
   // Re-check that the slot is free right now: database + office Google Calendar.
   const date = dhakaDate(start);
-  const { settings, service, slots } = await slotsFor(env, date, body.service_id);
+  const { settings, service: found, slots } = await slotsFor(env, date, body.service_id);
+  const service = body.service_id === OTHER_SERVICE_ID
+    ? { ...found, name: 'Other: ' + str(body.service_other, 120, { min: 3, name: 'the service you need' }) } : found;
   if (!settings.modes.includes(body.mode)) fail(400, 'INVALID_INPUT', 'This meeting type is not offered.');
   if (!slots.includes(start)) fail(409, 'SLOT_TAKEN', 'Sorry, that time is no longer available. Please choose another time.');
 
@@ -690,6 +697,15 @@ export default {
         if (r === 'me') return json({ admin });
         if (r === 'bookings') { need('GET'); return json(await adminBookings(env, url)); }
         if (r === 'bookings/update') { need('POST'); return json(await adminUpdateBooking(request, env, ctx, admin)); }
+        if (r === 'client-history') {
+          need('GET');
+          const phone = (url.searchParams.get('phone') || '').replace(/[^0-9+]/g, '').slice(0, 16);
+          const email = (url.searchParams.get('email') || '').toLowerCase().slice(0, 200);
+          if (!phone && !EMAIL.test(email)) fail(400, 'INVALID_INPUT', 'Phone or email required.');
+          const ors = [phone && `client_phone.eq.${q('"' + phone + '"')}`, EMAIL.test(email) && `client_email.eq.${q('"' + email + '"')}`].filter(Boolean).join(',');
+          const rows = await db(env, `appt_bookings?select=id,start_at,service_name,status,mode&or=(${ors})&order=start_at.desc&limit=50`);
+          return json({ bookings: rows });
+        }
         if (r === 'referrals') { need('GET'); const { from, to } = dateRange(url); return json({ rows: await rpc(env, 'appt_referral_report', { p_from: from, p_to: to }) }); }
         if (r === 'settings') { if (method === 'GET') return json(await adminSettings(env, request)); need('POST'); return json(await saveSettings(request, env, admin)); }
         if (r === 'services') { need('POST'); return json(await saveService(request, env, admin)); }

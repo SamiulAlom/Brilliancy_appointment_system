@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react';
-import { CalendarDays, Copy, Link2, LogOut, RefreshCw, Settings2, Users } from 'lucide-react';
+import { BarChart3, CalendarDays, Copy, History, Link2, LogOut, MessageCircle, RefreshCw, Settings2, Users } from 'lucide-react';
+import Analytics from './Analytics';
 import Brand from './Brand';
 import { api, type Mode, type OffDay, type Service } from './lib/api';
 import { supabase } from './lib/supabase';
@@ -11,7 +12,7 @@ type Referrer = { code: string; full_name: string; designation: string; email: s
 type SettingsPayload = { settings: Record<string, unknown> & { open_time: string; close_time: string; working_days: number[]; slot_step_min: number; min_notice_min: number; max_days_ahead: number; modes: Mode[]; office_address: string; calendar_id: string; notify_email: string };
   services: Service[]; off_days: OffDay[]; google: { connected: boolean; email: string | null; connected_at: string | null; last_ok_at: string | null; last_error: string | null; redirect_uri: string }; referrers: Referrer[] };
 type ReportRow = { referrer_code: string | null; full_name: string | null; referrer_label: string; total: number; upcoming: number; completed: number; no_show: number; cancelled: number };
-type Tab = 'bookings' | 'referrals' | 'settings';
+type Tab = 'bookings' | 'analytics' | 'referrals' | 'settings';
 const STATUS: Record<string, string> = { calendar_pending: 'Calendar pending', confirmed: 'Confirmed', completed: 'Completed', no_show: 'No-show', cancelled: 'Cancelled' };
 const MODE: Record<Mode, string> = { office: 'Office', meet: 'Meet', phone: 'Phone' };
 const today = dhakaDate(Date.now());
@@ -67,7 +68,7 @@ function Portal({ token, admin, signOut }: { token: string; admin: { full_name: 
     <header className="admin-bar">
       <Brand caption="Appointments admin"/>
       <nav>
-        {([['bookings', 'Bookings', CalendarDays], ['referrals', 'Referrals', Users], ['settings', 'Settings', Settings2]] as const).map(([k, label, Icon]) =>
+        {([['bookings', 'Bookings', CalendarDays], ['analytics', 'Analytics', BarChart3], ['referrals', 'Referrals', Users], ['settings', 'Settings', Settings2]] as const).map(([k, label, Icon]) =>
           <button key={k} className={tab === k ? 'on' : ''} onClick={() => setTab(k)}><Icon size={16}/>{label}</button>)}
       </nav>
       <div className="who"><span>{admin.full_name}</span><button className="link" onClick={signOut}><LogOut size={15}/> Sign out</button></div>
@@ -75,6 +76,7 @@ function Portal({ token, admin, signOut }: { token: string; admin: { full_name: 
     <main className="admin-main">
       {tab === 'bookings' && <Bookings token={token}/>}
       {tab === 'referrals' && <Referrals token={token}/>}
+      {tab === 'analytics' && <Analytics token={token}/>}
       {tab === 'settings' && <SettingsTab token={token}/>}
     </main>
   </div>;
@@ -129,6 +131,14 @@ function BookingDrawer({ token, booking: b, onClose, onSaved }: { token: string;
     catch (e) { setError((e as Error).message); } finally { setBusy(''); }
   };
   const active = ['confirmed', 'calendar_pending'].includes(b.status);
+  const [history, setHistory] = useState<{ id: string; start_at: string; service_name: string; status: string }[] | null>(null);
+  useEffect(() => {
+    setHistory(null);
+    api<{ bookings: { id: string; start_at: string; service_name: string; status: string }[] }>(`/api/admin/client-history?phone=${encodeURIComponent(b.client_phone)}&email=${encodeURIComponent(b.client_email)}`, { token })
+      .then(r => setHistory(r.bookings)).catch(() => setHistory([]));
+  }, [b.id]);
+  const wa = b.client_phone.replace(/\D/g, '').replace(/^0/, '880');
+  const waText = encodeURIComponent(`Hello ${b.client_name.split(' ')[0]}, this is Brilliancy Research about your ${b.service_name} appointment on ${fmtDateTime(b.start_at)}.`);
   return <div className="drawer-back" onClick={onClose}><aside className="drawer" onClick={e => e.stopPropagation()} role="dialog" aria-label="Booking details">
     <button className="link close" onClick={onClose}>Close</button>
     <span className={`pill ${b.status}`}>{STATUS[b.status]}</span>
@@ -140,7 +150,19 @@ function BookingDrawer({ token, booking: b, onClose, onSaved }: { token: string;
       <div><dt>Institution</dt><dd>{b.client_institution || '—'}</dd></div><div><dt>Referred by</dt><dd>{b.referrer_label}{b.referrer_code && <small> · {b.referrer_code}</small>}</dd></div>
       <div><dt>Booked</dt><dd>{fmtDateTime(b.created_at)}</dd></div>
     </dl>
+    <div className="quick">
+      <a className="secondary" href={`https://wa.me/${wa}?text=${waText}`} target="_blank" rel="noreferrer"><MessageCircle size={15}/> WhatsApp</a>
+      <a className="secondary" href={`tel:${b.client_phone}`}>Call</a>
+      <a className="secondary" href={`mailto:${b.client_email}`}>Email</a>
+    </div>
     {b.client_note && <p className="quote">“{b.client_note}”</p>}
+    <div className="history">
+      <h3><History size={15}/> Client history</h3>
+      {!history && <p className="muted small">Loading…</p>}
+      {history && history.length <= 1 && <p className="muted small">First booking from this client.</p>}
+      {history && history.length > 1 && <><p className="small"><strong>{history.length} bookings</strong> · {history.filter(h => h.status === 'completed').length} completed · {history.filter(h => h.status === 'no_show').length} no-show</p>
+        <ul className="plain small">{history.filter(h => h.id !== b.id).slice(0, 6).map(h => <li key={h.id}>{fmtDateTime(h.start_at)} · {h.service_name} <span className={`pill ${h.status}`}>{STATUS[h.status]}</span></li>)}</ul></>}
+    </div>
     {b.calendar_error && <p className="alert">Google Calendar: {b.calendar_error} {b.status === 'calendar_pending' && <button className="link" disabled={!!busy} onClick={() => update({ status: 'retry_calendar' }, 'retry')}>Retry now</button>}</p>}
     <label>Internal note<textarea rows={3} value={note} onChange={e => setNote(e.target.value)}/></label>
     <button className="secondary" disabled={!!busy || note === b.internal_note} onClick={() => update({ internal_note: note }, 'note')}>{busy === 'note' ? 'Saving…' : 'Save note'}</button>
