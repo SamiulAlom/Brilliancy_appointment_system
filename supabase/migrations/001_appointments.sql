@@ -25,7 +25,7 @@ create table if not exists public.appt_settings (
   min_notice_min integer not null default 120 check (min_notice_min between 0 and 10080),
   max_days_ahead integer not null default 30 check (max_days_ahead between 1 and 180),
   modes text[] not null default '{office,meet,phone}',
-  office_address text not null default '201–202 BUET Market, Polashi, Dhaka-1000',
+  office_address text not null default 'Level 13, Fareast Tower, 35 Topkhana Road, Dhaka 1000',
   calendar_id text not null default 'primary',
   notify_email text not null default 'brilliancycomms@gmail.com',
   updated_at timestamptz not null default now(),

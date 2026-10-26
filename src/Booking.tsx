@@ -1,17 +1,18 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
-import { Building2, CalendarCheck, Check, Clock3, Phone, Video } from 'lucide-react';
+import { Building2, CalendarCheck, Check, Clock3, PenLine, Phone, Video } from 'lucide-react';
 import Brand from './Brand';
 import { api, ApiError, type Mode, type PublicBooking, type PublicConfig } from './lib/api';
 import { addDays, at, fmtDay, fmtTime, weekday } from './lib/time';
 
 const MODE_INFO: Record<Mode, { label: string; hint: string; Icon: typeof Video }> = {
-  office: { label: 'At our office', hint: 'BUET Market, Polashi', Icon: Building2 },
+  office: { label: 'At our office', hint: 'Fareast Tower, Topkhana Road', Icon: Building2 },
   meet: { label: 'Google Meet', hint: 'Video call link by email', Icon: Video },
   phone: { label: 'Phone call', hint: 'We call your number', Icon: Phone },
 };
 type Slot = { start: string; label: string };
 const params = new URLSearchParams(location.search);
 const REF_FROM_LINK = (params.get('ref') || '').trim();
+const OTHER = 'other';
 
 export default function Booking() {
   const [config, setConfig] = useState<PublicConfig | null>(null);
@@ -23,6 +24,7 @@ export default function Booking() {
   const [slotError, setSlotError] = useState('');
   const [start, setStart] = useState('');
   const [form, setForm] = useState({ name: '', phone: '', email: '', institution: '', note: '' });
+  const [serviceOther, setServiceOther] = useState('');
   const [refChoice, setRefChoice] = useState('');      // employee code, '__none' or '__other'
   const [refOther, setRefOther] = useState('');
   const [refLocked, setRefLocked] = useState(false);
@@ -52,7 +54,9 @@ export default function Booking() {
     else { const s = document.createElement('script'); s.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js'; s.async = true; s.onload = render; document.head.appendChild(s); }
   });
 
-  const service = config?.services.find(s => s.id === serviceId);
+  const service = serviceId === OTHER && config
+    ? { id: OTHER, name: serviceOther.trim() ? `Other: ${serviceOther.trim()}` : 'Other service', description: '', duration_min: config.other_duration_min || 30 }
+    : config?.services.find(s => s.id === serviceId);
   const days = useMemo(() => {
     if (!config) return [];
     const { settings, today, off_days } = config;
@@ -81,7 +85,7 @@ export default function Booking() {
   }, [config, service, date, slots]);
 
   const refName = config?.referrers.find(r => r.code === refChoice)?.name;
-  const ready = !!(service && mode && start && form.name.trim().length >= 2 && form.phone && form.email && refChoice && (refChoice !== '__other' || refOther.trim().length >= 2) && (!siteKey || turnstileToken));
+  const ready = !!(service && (serviceId !== OTHER || serviceOther.trim().length >= 3) && mode && start && form.name.trim().length >= 2 && form.phone && form.email && refChoice && (refChoice !== '__other' || refOther.trim().length >= 2) && (!siteKey || turnstileToken));
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -89,7 +93,7 @@ export default function Booking() {
     setSubmitting(true); setError('');
     try {
       const res = await api<{ booking: PublicBooking; manage_token: string }>('/api/public/bookings', { method: 'POST', body: JSON.stringify({
-        idempotency_key: idem.current, service_id: serviceId, mode, start, ...form,
+        idempotency_key: idem.current, service_id: serviceId, service_other: serviceId === OTHER ? serviceOther : undefined, mode, start, ...form,
         referrer_source: refChoice === '__other' ? 'other' : refChoice === '__none' ? 'none' : refLocked ? 'link' : 'dropdown',
         referrer_code: refChoice.startsWith('__') ? null : refChoice, referrer_other: refChoice === '__other' ? refOther : '',
         turnstile_token: turnstileToken || undefined,
@@ -132,7 +136,17 @@ export default function Booking() {
               <span className="service-desc">{s.description}</span>
               <span className="service-len">{s.duration_min} min</span>
             </label>)}
+            <label className={`service other ${serviceId === OTHER ? 'on' : ''}`}>
+              <input type="radio" name="service" value={OTHER} checked={serviceId === OTHER} onChange={() => setServiceId(OTHER)}/>
+              <span className="service-name"><PenLine size={15} aria-hidden/> Something else</span>
+              <span className="service-desc">Not listed? Tell us what you need.</span>
+              <span className="service-len">{config.other_duration_min || 30} min</span>
+            </label>
           </div>
+          {serviceId === OTHER && <label className="other-input">What do you need help with?
+            <input autoFocus maxLength={120} value={serviceOther} onChange={e => setServiceOther(e.target.value)} placeholder="E.g. plagiarism check, data analysis in SPSS, conference poster"/>
+            <small>{serviceOther.trim().length < 3 ? 'Type at least a few words so the right consultant can prepare.' : 'Thanks — we will match you with the right consultant.'}</small>
+          </label>}
         </section>
 
         <section className="step" aria-labelledby="s2">
@@ -193,7 +207,7 @@ export default function Booking() {
           {siteKey && <div ref={turnstileBox} className="turnstile"/>}
           {error && <p className="alert" role="alert">{error}</p>}
           <button className="primary" disabled={!ready || submitting}>{submitting ? 'Booking…' : 'Confirm booking'}</button>
-          {!ready && <p className="muted small">Choose a service, meeting type and time, then fill in your name, phone, email and who referred you.</p>}
+          {!ready && <p className="muted small">Choose a service (or describe it), meeting type and time, then fill in your name, phone, email and who referred you.</p>}
         </section>
       </form>}
     </main>

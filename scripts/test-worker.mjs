@@ -6,7 +6,7 @@ let passed = 0; const ok = (n) => { passed++; console.log('  ✓', n); };
 
 // ---------- slot engine ----------
 const settings = { open_time: '10:00:00', close_time: '19:00:00', working_days: [6, 0, 1, 2, 3, 4], slot_step_min: 30, min_notice_min: 120, max_days_ahead: 30,
-  modes: ['office', 'meet', 'phone'], office_address: '201–202 BUET Market', calendar_id: 'primary', notify_email: 'office@example.com' };
+  modes: ['office', 'meet', 'phone'], office_address: 'Level 13, Fareast Tower', calendar_id: 'primary', notify_email: 'office@example.com' };
 const now = Date.parse('2026-10-25T06:00:00+06:00'); // Sunday 6 AM Dhaka
 const labels = (slots) => slots.map(t => new Date(t + 6 * 3600e3).toISOString().slice(11, 16));
 let s = computeSlots({ date: '2026-10-26', settings, duration: 30, now });
@@ -118,6 +118,16 @@ const taken = await call('/api/public/bookings', { method: 'POST', body: JSON.st
 assert.equal(taken.status, 409); assert.equal(taken.data.error.code, 'SLOT_TAKEN'); ok('second client cannot take the same slot');
 const bad = await call('/api/public/bookings', { method: 'POST', body: JSON.stringify({ ...form, idempotency_key: crypto.randomUUID(), referrer_code: 'NOPE', start: sl.data.slots[3].start }) });
 assert.equal(bad.status, 400); ok('unknown referrer rejected');
+
+const otherSlots = await call(`/api/public/slots?date=${day}&service=other`);
+assert.equal(otherSlots.status, 200); assert.ok(otherSlots.data.slots.length > 0); ok('slots work for the Other service');
+const noText = await call('/api/public/bookings', { method: 'POST', body: JSON.stringify({ ...form, idempotency_key: crypto.randomUUID(), service_id: 'other', start: otherSlots.data.slots[4].start }) });
+assert.equal(noText.status, 400); ok('Other service requires a description');
+const other = await call('/api/public/bookings', { method: 'POST', body: JSON.stringify({ ...form, idempotency_key: crypto.randomUUID(), service_id: 'other', service_other: 'Plagiarism check for thesis', start: otherSlots.data.slots[4].start, phone: '01800000001', email: 'other@example.com', referrer_code: null, referrer_source: 'none' }) });
+assert.equal(other.status, 201, JSON.stringify(other.data));
+const orow = state.bookings.find(b => b.client_email === 'other@example.com');
+assert.equal(orow.service_id, null); assert.equal(orow.service_name, 'Other: Plagiarism check for thesis'); assert.equal(orow.duration_min, 30);
+ok('Other service booking stores the typed service (30 min)');
 
 const mg = await call('/api/public/manage?token=' + bk.data.manage_token);
 assert.equal(mg.status, 200); assert.equal(mg.data.booking.can_cancel, true); ok('manage link shows booking');

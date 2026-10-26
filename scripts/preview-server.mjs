@@ -7,7 +7,7 @@ import worker from '../worker/worker.js';
 const { computeSlots, dhakaDate, at } = worker._test;
 
 const settings = { open_time: '10:00', close_time: '19:00', working_days: [6, 0, 1, 2, 3, 4], slot_step_min: 30, min_notice_min: 120, max_days_ahead: 30, modes: ['office', 'meet', 'phone'],
-  office_address: '201–202 BUET Market, Polashi, Dhaka-1000', calendar_id: 'primary', notify_email: 'brilliancycomms@gmail.com' };
+  office_address: 'Level 13, Fareast Tower, 35 Topkhana Road, Dhaka 1000', calendar_id: 'primary', notify_email: 'brilliancycomms@gmail.com' };
 const services = [
   { id: 'a1111111-1111-4111-8111-111111111111', name: 'General consultation', description: 'Discuss your project, timeline and which service fits.', duration_min: 30, sort_order: 10, active: true },
   { id: 'a2222222-2222-4222-8222-222222222222', name: 'Manuscript writing & correction', description: 'Journal manuscript drafting, editing, correction and formatting.', duration_min: 45, sort_order: 20, active: true },
@@ -27,6 +27,20 @@ const seed = (d, hh, mins, svc, name, phone, ref, status = 'confirmed') => booki
   client_institution: 'BUET', client_note: 'Need help before the December deadline.', referrer_code: ref, referrer_label: referrers.find(r => r.code === ref)?.full_name || '—', referrer_source: ref ? 'dropdown' : 'none', meet_link: null, calendar_error: null, internal_note: '', created_at: new Date().toISOString() });
 seed(day, '11:00', 45, 1, 'Farhana Hoque', '01711000001', 'BR21510926'); seed(day, '14:30', 30, 4, 'Tanvir Islam', '01811000002', 'BR21011024'); seed(day, '16:00', 45, 6, 'Nusrat Jahan', '01911000003', null);
 seed(today, '10:30', 30, 0, 'Rakib Hasan', '01611000004', 'BR21510926', 'completed');
+// ~80 historical bookings for the analytics preview (deterministic pseudo-random)
+let seedN = 7; const rnd = () => (seedN = (seedN * 9301 + 49297) % 233280) / 233280;
+const names = ['Nusrat Jahan', 'Tanvir Islam', 'Farhana Hoque', 'Mahmud Hasan', 'Sadia Afrin', 'Rafiq Ahmed', 'Mitu Akter', 'Arif Hossain', 'Jannat Ara', 'Sabbir Rahman', 'Tasnim Noor', 'Imran Kabir'];
+const insts = ['BUET', 'University of Dhaka', 'DU', 'NSU', 'BRAC University', 'JU', 'KUET', '', 'RUET', 'SUST'];
+for (let i = 0; i < 80; i++) {
+  let d = dhakaDate(Date.now() - Math.floor(rnd() * 88 + 1) * 86400e3); if (new Date(d + 'T00:00:00Z').getUTCDay() === 5) continue;
+  const hh = String(10 + Math.floor(Math.pow(rnd(), 0.8) * 8)).padStart(2, '0') + (rnd() > .5 ? ':30' : ':00');
+  const k = Math.floor(rnd() * names.length), svc = Math.floor(Math.pow(rnd(), 1.4) * 7);
+  const st = rnd(); const status = st < .68 ? 'completed' : st < .8 ? 'no_show' : 'cancelled';
+  const ref = rnd() < .7 ? referrers[Math.floor(Math.pow(rnd(), 1.6) * referrers.length)].code : null;
+  seed(d, hh, services[svc].duration_min, svc, names[k], '0171100' + String(1000 + k), ref, status);
+  bookings[bookings.length - 1].client_institution = insts[Math.floor(rnd() * insts.length)];
+  if (rnd() < .08) { bookings[bookings.length - 1].service_name = 'Other: ' + ['Plagiarism check', 'SPSS data analysis', 'Conference poster'][Math.floor(rnd() * 3)]; }
+}
 const google = { connected: true, email: 'brilliancycomms@gmail.com', connected_at: new Date().toISOString(), last_ok_at: new Date().toISOString(), last_error: null, redirect_uri: 'http://127.0.0.1:8787/api/google/callback' };
 const fmtTime = (ms) => new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Dhaka', hour: 'numeric', minute: '2-digit', hour12: true }).format(new Date(ms));
 const fmtWhen = (iso) => new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Dhaka', weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true }).format(new Date(iso));
@@ -41,11 +55,11 @@ createServer(async (req, res) => {
   let body = ''; for await (const c of req) body += c; body = body ? JSON.parse(body) : {};
   const p = url.pathname;
   if (p.startsWith('/auth/v1/')) return send({ id: 'demo', aud: 'authenticated', role: 'authenticated', email: 'admin@example.com', user_metadata: {}, app_metadata: {}, access_token: 'x', refresh_token: 'demo', expires_in: 3600, token_type: 'bearer', user: { id: 'demo', aud: 'authenticated', role: 'authenticated', email: 'admin@example.com', user_metadata: {}, app_metadata: {} } });
-  if (p === '/api/public/config') return send({ today, timezone: 'Asia/Dhaka', settings, services, referrers: referrers.map(r => ({ code: r.code, name: r.full_name })), off_days: [{ id: '1', from_date: dhakaDate(Date.now() + 5 * 86400e3), to_date: dhakaDate(Date.now() + 5 * 86400e3), reason: 'Office holiday' }], calendar_connected: true });
-  if (p === '/api/public/slots') { const svc = services.find(s => s.id === url.searchParams.get('service')); const d = url.searchParams.get('date');
+  if (p === '/api/public/config') return send({ today, timezone: 'Asia/Dhaka', settings, services, referrers: referrers.map(r => ({ code: r.code, name: r.full_name })), off_days: [{ id: '1', from_date: dhakaDate(Date.now() + 5 * 86400e3), to_date: dhakaDate(Date.now() + 5 * 86400e3), reason: 'Office holiday' }], calendar_connected: true, other_duration_min: 30 });
+  if (p === '/api/public/slots') { const svc = url.searchParams.get('service') === 'other' ? { duration_min: 30 } : services.find(s => s.id === url.searchParams.get('service')); const d = url.searchParams.get('date');
     return send({ date: d, slots: computeSlots({ date: d, settings, duration: svc.duration_min, busy: busy(d) }).map(t => ({ start: new Date(t).toISOString(), label: fmtTime(t) })) }); }
   if (p === '/api/public/bookings') {
-    const svc = services.find(s => s.id === body.service_id); const start = Date.parse(body.start);
+    const svc = body.service_id === 'other' ? { name: 'Other: ' + body.service_other, duration_min: 30 } : services.find(s => s.id === body.service_id); const start = Date.parse(body.start);
     if (bookings.some(b => b.status === 'confirmed' && Date.parse(b.start_at) < start + svc.duration_min * 60e3 && Date.parse(b.end_at) > start)) return send({ error: { code: 'SLOT_TAKEN', message: 'Sorry, that time was just booked. Please choose another time.' } }, 409);
     const ref = referrers.find(r => r.code === body.referrer_code);
     const b = { id: crypto.randomUUID(), service_name: svc.name, duration_min: svc.duration_min, mode: body.mode, start_at: new Date(start).toISOString(), end_at: new Date(start + svc.duration_min * 60e3).toISOString(), status: 'confirmed',
@@ -59,6 +73,7 @@ createServer(async (req, res) => {
   if (p === '/api/admin/me') return send({ admin: { id: 'x', full_name: 'Hasanul Banna' } });
   if (p === '/api/admin/bookings') return send({ bookings: bookings.filter(b => b.start_at >= new Date(at(url.searchParams.get('from'), '00:00')).toISOString() && b.start_at < new Date(at(url.searchParams.get('to'), '00:00') + 86400e3).toISOString()) });
   if (p === '/api/admin/bookings/update') { const b = bookings.find(b => b.id === body.id); if (body.status) b.status = body.status; if (body.internal_note !== undefined) b.internal_note = body.internal_note; return send({ booking: b }); }
+  if (p === '/api/admin/client-history') { const ph = url.searchParams.get('phone'); return send({ bookings: bookings.filter(b => b.client_phone === ph).sort((x, y) => y.start_at.localeCompare(x.start_at)) }); }
   if (p === '/api/admin/referrals') { const m = {}; for (const b of bookings) { const k = b.referrer_label; m[k] ||= { referrer_code: b.referrer_code, full_name: b.referrer_label, referrer_label: k === '—' ? 'No referrer' : k, total: 0, upcoming: 0, completed: 0, no_show: 0, cancelled: 0 }; m[k].total++; m[k][b.status === 'confirmed' ? 'upcoming' : b.status]++; } return send({ rows: Object.values(m) }); }
   if (p === '/api/admin/settings') { if (req.method === 'POST') Object.assign(settings, body); return send({ settings, services, off_days: [], google, referrers }); }
   if (p.startsWith('/api/admin/')) return send({ ok: true });

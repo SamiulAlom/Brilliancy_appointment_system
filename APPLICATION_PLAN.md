@@ -31,7 +31,7 @@ Assumptions (change any time in Admin → Settings): 30-minute slot step, 2-hour
 ## 4. Client flow
 
 1. Choose service (duration shown).
-2. Choose meeting type: In office (201–202 BUET Market, Polashi), Google Meet, or Phone.
+2. Choose meeting type: In office (Level 13, Fareast Tower, 35 Topkhana Road), Google Meet, or Phone.
 3. Choose date (Fridays, off days and dates outside the booking window are disabled) and a free time.
 4. Enter name, phone/WhatsApp, email, university/institution, short note, **referred by**.
 5. Confirm → confirmation screen + email with a private link to view or cancel. Google Calendar also sends its own invite (with a Meet link for online meetings).

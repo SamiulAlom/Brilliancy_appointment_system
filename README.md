@@ -6,7 +6,7 @@ Public appointment booking website for clients, with Google Calendar sync, refer
 
 ## What clients get
 
-1. Choose a service (consultation, manuscript, proposal/SLR, formatting, CV, scholarship, GIS) and how to meet (office, Google Meet or phone).
+1. Choose a service (consultation, manuscript, proposal/SLR, formatting, CV, scholarship, GIS) — or **Something else** and type what they need — and how to meet (office at Level 13, Fareast Tower, 35 Topkhana Road, Dhaka 1000; Google Meet; or phone).
 2. Pick a day and a time. Only times that are free on the **office Google Calendar** and not already booked are offered. Fridays, office off days, past times and times less than 2 hours away are closed. Hours: 10:00 AM – 7:00 PM, Saturday–Thursday (editable).
 3. Enter name, phone, email, institution, a note, and **who referred them** (a dropdown of communication/consultant employees; a referral link `/?ref=EMPLOYEE_ID` fills it in automatically).
 4. Booking is confirmed instantly after the server re-checks the slot. The client gets a confirmation email, a Google Calendar invitation (with a Meet link for online meetings), a reminder about 24 hours before, and a private link to view or cancel.
@@ -17,6 +17,8 @@ No client account and no payment.
 
 - Every booking is written to the office Google Calendar with client details and the referrer in the description.
 - An email to the office inbox for each new booking and each client cancellation; an email to the referring employee when their referral books.
+- **Client analysis** (Admin → Analytics): appointments per day/week, busiest days and hours heatmap, by service, referrer, meeting type, institution and outcome; show-up and cancellation rates, unique and returning clients, typed "Something else" requests; every chart also available as a table.
+- **Booking drawer**: one-tap WhatsApp / call / email and the client's full visit history.
 - **Admin portal** (`/admin`, email + password admins listed in `appt_admins`): bookings list with search, filters, details drawer, internal notes, mark completed / no-show / cancel, CSV export; referral report per employee with CSV and copyable referral links; settings for hours, working days, slot step, notice, days ahead, meeting types, services, off days, referring employees and the Google Calendar connection.
 
 ## Reliability
