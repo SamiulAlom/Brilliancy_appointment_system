@@ -7,22 +7,25 @@
     "dev": "vite --host 127.0.0.1",
     "build": "tsc -b && vite build",
     "preview": "vite preview --host 127.0.0.1",
-    "test": "node scripts/test-database.mjs && node scripts/test-worker.mjs",
+    "test": "node scripts/test-server.mjs",
     "test:database": "node scripts/test-database.mjs",
-    "test:worker": "node scripts/test-worker.mjs"
+    "test:worker": "node scripts/test-worker.mjs",
+    "start": "node server/index.js"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.117.2",
     "lucide-react": "^0.468.0",
+    "mysql2": "^3.24.6",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"
   },
   "devDependencies": {
-    "@electric-sql/pglite": "^0.5.8",
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",
     "@vitejs/plugin-react": "^4.5.0",
     "typescript": "~5.8.3",
     "vite": "^6.3.5"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }

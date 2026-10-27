@@ -3,14 +3,14 @@ import { BarChart3, CalendarDays, Copy, History, Link2, LogOut, MessageCircle, R
 import Analytics from './Analytics';
 import Brand from './Brand';
 import { api, type Mode, type OffDay, type Service } from './lib/api';
-import { supabase } from './lib/supabase';
 import { addDays, DAY_NAMES, dhakaDate, fmtDateTime } from './lib/time';
 
 type Booking = { id: string; service_name: string; duration_min: number; mode: Mode; start_at: string; end_at: string; status: string; client_name: string; client_phone: string; client_email: string;
   client_institution: string; client_note: string; referrer_label: string; referrer_code: string | null; referrer_source: string; meet_link: string | null; calendar_error: string | null; internal_note: string; created_at: string };
 type Referrer = { code: string; full_name: string; designation: string; email: string | null; phone: string; notify: boolean; active: boolean };
+type AdminRow = { id: string; email: string; full_name: string; active: boolean };
 type SettingsPayload = { settings: Record<string, unknown> & { open_time: string; close_time: string; working_days: number[]; slot_step_min: number; min_notice_min: number; max_days_ahead: number; modes: Mode[]; office_address: string; calendar_id: string; notify_email: string };
-  services: Service[]; off_days: OffDay[]; google: { connected: boolean; email: string | null; connected_at: string | null; last_ok_at: string | null; last_error: string | null; redirect_uri: string }; referrers: Referrer[] };
+  services: Service[]; off_days: OffDay[]; google: { connected: boolean; email: string | null; connected_at: string | null; last_ok_at: string | null; last_error: string | null; redirect_uri: string }; referrers: Referrer[]; admins?: AdminRow[] };
 type ReportRow = { referrer_code: string | null; full_name: string | null; referrer_label: string; total: number; upcoming: number; completed: number; no_show: number; cancelled: number };
 type Tab = 'bookings' | 'analytics' | 'referrals' | 'settings';
 const STATUS: Record<string, string> = { calendar_pending: 'Calendar pending', confirmed: 'Confirmed', completed: 'Completed', no_show: 'No-show', cancelled: 'Cancelled' };
@@ -19,39 +19,38 @@ const today = dhakaDate(Date.now());
 const GOOGLE_MSG: Record<string, string> = { connected: 'Office Google Calendar connected.', denied: 'Google sign-in was cancelled.', invalid_state: 'The sign-in link expired. Try again.', expired: 'The sign-in link expired. Try again.',
   no_refresh_token: 'Google did not grant offline access. Remove the app in your Google Account → Security → Third-party access, then connect again.', missing_permission: 'Calendar permission was not granted. Tick both calendar permissions on the Google screen.', failed: 'Google sign-in failed. Try again.' };
 
+const TOKEN_KEY = 'brilliancy-appointments-admin';
+const readToken = () => { try { return localStorage.getItem(TOKEN_KEY); } catch { return null; } };
+const writeToken = (t: string | null) => { try { if (t) localStorage.setItem(TOKEN_KEY, t); else localStorage.removeItem(TOKEN_KEY); } catch { /* private mode: session lasts until reload */ } };
+
 export default function Admin() {
-  const [token, setToken] = useState<string | null>(null);
-  const [checked, setChecked] = useState(false);
+  const [token, setTokenState] = useState<string | null>(readToken);
   const [admin, setAdmin] = useState<{ id: string; full_name: string } | null>(null);
   const [authError, setAuthError] = useState('');
-  useEffect(() => {
-    if (!supabase) { setChecked(true); return; }
-    supabase.auth.getSession().then(({ data }) => { setToken(data.session?.access_token || null); setChecked(true); });
-    const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => setToken(s?.access_token || null));
-    return () => sub.subscription.unsubscribe();
-  }, []);
+  const [needsSetup, setNeedsSetup] = useState<boolean | null>(null);
+  const setToken = (t: string | null) => { writeToken(t); setTokenState(t); };
+  useEffect(() => { api<{ needs_setup: boolean }>('/api/auth/setup-status').then(r => setNeedsSetup(r.needs_setup)).catch(() => setNeedsSetup(false)); }, []);
   useEffect(() => {
     if (!token) { setAdmin(null); return; }
-    api<{ admin: { id: string; full_name: string } }>('/api/admin/me', { token }).then(r => setAdmin(r.admin)).catch(async (e: Error & { code?: string }) => {
-      setAuthError(e.message); if (e.code === 'ADMIN_REQUIRED' || e.code === 'SESSION_EXPIRED') await supabase?.auth.signOut();
+    api<{ admin: { id: string; full_name: string } }>('/api/admin/me', { token }).then(r => setAdmin(r.admin)).catch((e: Error & { code?: string }) => {
+      if (['ADMIN_REQUIRED', 'SESSION_EXPIRED', 'SIGN_IN_REQUIRED'].includes(e.code || '')) { setToken(null); setAuthError(e.code === 'SESSION_EXPIRED' ? e.message : ''); }
+      else setAuthError(e.message);
     });
   }, [token]);
-  if (!checked) return null;
-  if (!supabase) return <Shell><p className="alert">Admin sign-in needs VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY.</p></Shell>;
-  if (!token || !admin) return <Login error={authError} onError={setAuthError}/>;
-  return <Portal token={token} admin={admin} signOut={() => supabase!.auth.signOut()}/>;
+  if (needsSetup === null) return null;
+  if (needsSetup && !token) return <Setup onDone={t => { setNeedsSetup(false); setToken(t); }}/>;
+  if (!token || !admin) return <Login error={authError} onError={setAuthError} onToken={setToken}/>;
+  return <Portal token={token} admin={admin} signOut={() => setToken(null)}/>;
 }
 
 function Shell({ children }: { children: ReactNode }) { return <div className="done-shell"><Brand caption="Appointments admin"/><div className="ticket">{children}</div></div>; }
 
-function Login({ error, onError }: { error: string; onError: (e: string) => void }) {
+function Login({ error, onError, onToken }: { error: string; onError: (e: string) => void; onToken: (t: string) => void }) {
   const [u, setU] = useState(''); const [p, setP] = useState(''); const [busy, setBusy] = useState(false);
   async function submit(e: FormEvent) {
     e.preventDefault(); setBusy(true); onError('');
-    try {
-      const s = await api<{ access_token: string; refresh_token: string }>('/api/auth/login', { method: 'POST', body: JSON.stringify({ username: u, password: p }) });
-      const { error } = await supabase!.auth.setSession(s); if (error) throw error;
-    } catch (err) { onError((err as Error).message); } finally { setBusy(false); }
+    try { onToken((await api<{ access_token: string }>('/api/auth/login', { method: 'POST', body: JSON.stringify({ username: u, password: p }) })).access_token); }
+    catch (err) { onError((err as Error).message); } finally { setBusy(false); }
   }
   return <Shell><h1>Administrator sign-in</h1><p className="muted">Use the administrator email and password for this booking system.</p>
     <form onSubmit={submit} className="fields one">
@@ -59,6 +58,27 @@ function Login({ error, onError }: { error: string; onError: (e: string) => void
       <label>Password<input type="password" autoComplete="current-password" value={p} onChange={e => setP(e.target.value)} required/></label>
       {error && <p className="alert" role="alert">{error}</p>}
       <button className="primary" disabled={busy}>{busy ? 'Signing in…' : 'Sign in'}</button>
+    </form></Shell>;
+}
+
+function Setup({ onDone }: { onDone: (token: string) => void }) {
+  const [f, setF] = useState({ setup_code: '', full_name: '', email: '', password: '', confirm: '' }); const [busy, setBusy] = useState(false); const [error, setError] = useState('');
+  async function submit(e: FormEvent) {
+    e.preventDefault(); setError('');
+    if (f.password !== f.confirm) { setError('The two passwords do not match.'); return; }
+    setBusy(true);
+    try { onDone((await api<{ access_token: string }>('/api/auth/setup', { method: 'POST', body: JSON.stringify(f) })).access_token); }
+    catch (err) { setError((err as Error).message); } finally { setBusy(false); }
+  }
+  return <Shell><h1>Create the first administrator</h1><p className="muted">This appears only once, while no administrator exists. Enter the setup code from the server settings (SETUP_CODE).</p>
+    <form onSubmit={submit} className="fields one">
+      <label>Setup code<input value={f.setup_code} onChange={e => setF({ ...f, setup_code: e.target.value })} required autoComplete="off"/></label>
+      <label>Your name<input value={f.full_name} onChange={e => setF({ ...f, full_name: e.target.value })} required autoComplete="name"/></label>
+      <label>Email<input type="email" value={f.email} onChange={e => setF({ ...f, email: e.target.value })} required autoComplete="username"/></label>
+      <label>Password<input type="password" minLength={10} value={f.password} onChange={e => setF({ ...f, password: e.target.value })} required autoComplete="new-password"/><small>At least 10 characters.</small></label>
+      <label>Confirm password<input type="password" minLength={10} value={f.confirm} onChange={e => setF({ ...f, confirm: e.target.value })} required autoComplete="new-password"/></label>
+      {error && <p className="alert" role="alert">{error}</p>}
+      <button className="primary" disabled={busy}>{busy ? 'Creating…' : 'Create administrator'}</button>
     </form></Shell>;
 }
 
@@ -264,6 +284,14 @@ function SettingsTab({ token }: { token: string }) {
       <h2>Referring employees</h2>
       <p className="muted">The “Who referred you?” list on the booking page. Inactive employees are hidden from clients but keep their history. Email is used only to notify the employee when their referral books.</p>
       <ReferrerEditor referrers={data.referrers} busy={!!busy} onSave={r => post('/api/admin/referrers', r, 'ref')}/>
+      <BulkReferrers busy={!!busy} onImport={rows => post('/api/admin/referrers/bulk', { rows }, 'bulk')}/>
+    </div>
+
+    <div className="card">
+      <h2>Administrators</h2>
+      <p className="muted">People who can sign in to this admin portal.</p>
+      <AdminEditor admins={data.admins || []} busy={!!busy} onSave={a => post('/api/admin/admins', a, 'adm')}/>
+      <PasswordForm busy={!!busy} onSave={b => post('/api/admin/password', b, 'pw')}/>
     </div>
   </section>;
 }
@@ -311,4 +339,45 @@ function ReferrerEditor({ referrers, busy, onSave }: { referrers: Referrer[]; bu
       <label className="check self">Shown on booking page<input type="checkbox" checked={edit.active} onChange={e => setEdit({ ...edit, active: e.target.checked })}/></label></div>
       <button className="primary" disabled={busy}>Save employee</button> <button type="button" className="link" onClick={() => setEdit(null)}>Cancel</button></form>}
   </>;
+}
+
+/** Paste rows copied from Excel/Sheets (tab-separated) or CSV: ID, Name, Designation, Email, Phone. */
+function BulkReferrers({ busy, onImport }: { busy: boolean; onImport: (rows: Partial<Referrer>[]) => void }) {
+  const [open, setOpen] = useState(false); const [text, setText] = useState('');
+  const rows = useMemo(() => text.split(/\r?\n/).map(l => l.trim()).filter(Boolean).map(l => l.includes('\t') ? l.split('\t') : l.split(','))
+    .map(c => c.map(x => x.trim().replace(/^"|"$/g, ''))).filter(c => c[0] && !/^(employee )?id$/i.test(c[0]))
+    .map(([code, full_name, designation = '', email = '', phone = '']) => ({ code, full_name, designation, email, phone })), [text]);
+  if (!open) return <button className="secondary" onClick={() => setOpen(true)}>Bulk add from a spreadsheet</button>;
+  return <div className="inline-form">
+    <label>Paste rows: Employee ID, Name, Designation, Email, Phone (copy straight from Excel or Google Sheets)
+      <textarea rows={6} value={text} onChange={e => setText(e.target.value)} placeholder={'BR21510926\tAziz Ahmed\tCommunication\tname@example.com\t017…'}/></label>
+    <p className="muted small">{rows.length ? `${rows.length} employee${rows.length === 1 ? '' : 's'} ready. Existing IDs are updated, new IDs are added; nothing is deleted.` : 'Nothing pasted yet.'}</p>
+    <button className="primary" disabled={busy || !rows.length} onClick={() => { onImport(rows); setText(''); setOpen(false); }}>Import {rows.length || ''} employees</button>{' '}
+    <button type="button" className="link" onClick={() => setOpen(false)}>Cancel</button>
+  </div>;
+}
+function AdminEditor({ admins, busy, onSave }: { admins: AdminRow[]; busy: boolean; onSave: (a: Record<string, unknown>) => void }) {
+  const [edit, setEdit] = useState<{ email: string; full_name: string; password: string; active: boolean; isNew: boolean } | null>(null);
+  return <>
+    <ul className="plain">{admins.map(a => <li key={a.id} className={a.active ? '' : 'off'}><strong>{a.full_name}</strong> · {a.email}{!a.active && <span className="muted"> · inactive</span>}
+      <button className="link" onClick={() => setEdit({ email: a.email, full_name: a.full_name, password: '', active: a.active, isNew: false })}>Edit</button></li>)}</ul>
+    {!edit && <button className="secondary" onClick={() => setEdit({ email: '', full_name: '', password: '', active: true, isNew: true })}>Add administrator</button>}
+    {edit && <form className="inline-form" onSubmit={e => { e.preventDefault(); onSave(edit); setEdit(null); }}><div className="fields">
+      <label>Email<input type="email" required readOnly={!edit.isNew} value={edit.email} onChange={e => setEdit({ ...edit, email: e.target.value })}/></label>
+      <label>Name<input required value={edit.full_name} onChange={e => setEdit({ ...edit, full_name: e.target.value })}/></label>
+      <label>{edit.isNew ? 'Password' : 'New password (optional)'}<input type="password" minLength={10} required={edit.isNew} autoComplete="new-password" value={edit.password} onChange={e => setEdit({ ...edit, password: e.target.value })}/><small>At least 10 characters. Share it with them privately.</small></label>
+      {!edit.isNew && <label className="check self">Can sign in<input type="checkbox" checked={edit.active} onChange={e => setEdit({ ...edit, active: e.target.checked })}/></label>}
+    </div><button className="primary" disabled={busy}>Save administrator</button> <button type="button" className="link" onClick={() => setEdit(null)}>Cancel</button></form>}
+  </>;
+}
+function PasswordForm({ busy, onSave }: { busy: boolean; onSave: (b: { current: string; password: string }) => void }) {
+  const [open, setOpen] = useState(false); const [f, setF] = useState({ current: '', password: '', confirm: '' }); const [err, setErr] = useState('');
+  if (!open) return <p><button className="link" onClick={() => setOpen(true)}>Change my password</button></p>;
+  return <form className="inline-form" onSubmit={e => { e.preventDefault(); if (f.password !== f.confirm) { setErr('The new passwords do not match.'); return; } onSave({ current: f.current, password: f.password }); setOpen(false); setF({ current: '', password: '', confirm: '' }); }}>
+    <div className="fields">
+      <label>Current password<input type="password" required autoComplete="current-password" value={f.current} onChange={e => setF({ ...f, current: e.target.value })}/></label>
+      <label>New password<input type="password" minLength={10} required autoComplete="new-password" value={f.password} onChange={e => setF({ ...f, password: e.target.value })}/></label>
+      <label>Confirm new password<input type="password" minLength={10} required autoComplete="new-password" value={f.confirm} onChange={e => setF({ ...f, confirm: e.target.value })}/></label>
+    </div>{err && <p className="alert">{err}</p>}
+    <button className="primary" disabled={busy}>Change password</button> <button type="button" className="link" onClick={() => setOpen(false)}>Cancel</button></form>;
 }

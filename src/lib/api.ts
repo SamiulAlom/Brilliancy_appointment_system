@@ -1,5 +1,6 @@
+// Same origin by default (the Node server serves both the site and /api). VITE_API_URL only for a separate API host.
 const BASE = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '');
-export const apiConfigured = BASE.startsWith('https://') || BASE.startsWith('http://127.0.0.1') || BASE.startsWith('http://localhost');
+export const apiConfigured = true;
 export class ApiError extends Error { constructor(public status: number, public code: string, message: string) { super(message); } }
 export async function api<T>(path: string, init: RequestInit & { token?: string } = {}): Promise<T> {
   if (!apiConfigured) throw new ApiError(0, 'NOT_CONFIGURED', 'The booking service is not configured yet (VITE_API_URL).');

@@ -1,82 +1,50 @@
-# Deployment guide
+# Deploy on the Hostinger VPS (EasyPanel)
 
-Everything runs on free tiers. Allow about an hour. Do the steps in order.
+The app runs as its own EasyPanel project, separate from every other app on the VPS (for example studio). Nothing else on the server is changed.
 
-## 1. Database (Supabase, its own project)
+## 1. EasyPanel project and database
 
-1. Open the project's **SQL Editor**.
-2. Run all of `supabase/migrations/001_appointments.sql`. The result should show `bookings_table_ready = true`, `services_count = 7`, `overlap_guard_ready = true`. Safe to rerun.
-3. Run `supabase/private/002_seed_referrers.sql` (the 19 communication/consultant employees). Keep this file private; it holds staff emails and phone numbers. You can edit the list later in Admin → Settings → Referring employees.
-4. Create an admin: **Authentication → Users → Add user → Create new user** (email + password, tick *Auto Confirm User*). Then run:
-   ```sql
-   insert into public.appt_admins (auth_user_id, full_name)
-   select id, 'Your Name' from auth.users where lower(email) = 'admin@example.com';
-   ```
-   Admins sign in at `/admin` with that email and password. Remove access with `update public.appt_admins set active = false where ...`.
+1. hPanel → VPS → **Manage panel** (opens EasyPanel).
+2. **+ Create project** → name `appointments`.
+3. In the project: **+ Service → MySQL**, service name `mysql`, database `appointments`. EasyPanel generates the user and password. Copy the **internal connection URL** (looks like `mysql://mysql:…@appointments_mysql:3306/appointments`).
 
-## 2. Google Cloud (one time)
+## 2. The app
 
-1. Go to <https://console.cloud.google.com/> signed in as the **office Google account** (`brilliancycomms@gmail.com`), create a project "Brilliancy Appointments".
-2. **APIs & Services → Library** → enable **Google Calendar API**.
-3. **APIs & Services → OAuth consent screen**: External, app name "Brilliancy Appointments", support email and developer email = the office email. Add scopes `…/auth/calendar.events` and `…/auth/calendar.freebusy`. Add the office email as a test user.
-4. Fill **Branding**: home page `https://brilliancy-appointments.pages.dev`, privacy policy `https://brilliancy-appointments.pages.dev/privacy`, authorised domains `brilliancy-appointments.pages.dev` and your `workers.dev` subdomain. Then **publish the app** (Audience → *In production*). This matters: in *Testing* mode Google expires the connection every 7 days and bookings would stop reaching the calendar. Google will show an "unverified app" warning when connecting; that is fine for your own account. Verification is optional (needs a privacy-policy page and a domain you own).
-5. **Credentials → Create credentials → OAuth client ID → Web application**. Authorized redirect URI: `https://<your-worker>.workers.dev/api/google/callback` (you get the exact Worker URL in step 3; you can come back and add it). Copy the **Client ID** and **Client secret**.
+1. In the same project: **+ Service → App**, name `web`.
+2. **Source**: GitHub → repository `SamiulAlom/Brilliancy_appointment_system`, branch `version-3` (connect GitHub once in EasyPanel Settings → GitHub with a token that can read the private repo). **Build**: Dockerfile (the repo has one at the root).
+3. **Environment** (copy from `.env.example`):
 
-## 3. Worker (Cloudflare)
+| Name | Value |
+| --- | --- |
+| DATABASE_URL | the internal MySQL URL from step 1 |
+| PUBLIC_SITE_URL | `https://appointment.brilliancy-research.com` |
+| PORT | `3000` |
+| TOKEN_ENCRYPTION_KEY | 32 random bytes in base64 (keep it; changing it means reconnecting Google) |
+| SETUP_CODE | any 8+ character code, used once to create the first admin |
+| GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET | from Google Cloud → APIs & Services → Credentials → "Appointments Worker" |
+| BREVO_API_KEY | Brevo → SMTP & API → API keys |
+| BREVO_SENDER_EMAIL | `brilliancycomms@gmail.com` |
+| BREVO_SENDER_NAME | `Brilliancy Research` |
+| EMAIL_ENABLED | `true` |
 
-1. Cloudflare dashboard → **Workers & Pages → Create → Worker**, name `brilliancy-appointments-api`. Replace the code with the whole of `worker/worker.js` and deploy. Note the URL `https://brilliancy-appointments-api.<account>.workers.dev`.
-2. **Settings → Variables and Secrets** — add:
+4. **Domains**: add `appointment.brilliancy-research.com`, HTTPS on, port `3000`. EasyPanel issues the Let's Encrypt certificate once DNS points to the VPS.
+5. **Deploy**. `https://appointment.brilliancy-research.com/api/health` should show `"database":true,"configured":true`.
 
-| Name | Type | Value |
-| --- | --- | --- |
-| SUPABASE_URL | Text | `https://<project>.supabase.co` |
-| SUPABASE_PUBLISHABLE_KEY | Text | `sb_publishable_…` |
-| SUPABASE_SECRET_KEY | **Secret** | `sb_secret_…` |
-| ALLOWED_ORIGINS | Text | `https://brilliancy-appointments.pages.dev,http://127.0.0.1:5173,http://localhost:5173` |
-| PUBLIC_SITE_URL | Text | `https://brilliancy-appointments.pages.dev` |
-| GOOGLE_CLIENT_ID | Text | from step 2 |
-| GOOGLE_CLIENT_SECRET | **Secret** | from step 2 |
-| TOKEN_ENCRYPTION_KEY | **Secret** | 32 random bytes in base64 — run `openssl rand -base64 32` or `node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"` |
-| BREVO_API_KEY | **Secret** | Brevo API key (not the SMTP key) |
-| BREVO_SENDER_EMAIL | Text | `brilliancycomms@gmail.com` (verified in Brevo) |
-| BREVO_SENDER_NAME | Text | `Brilliancy Research` |
-| EMAIL_ENABLED | Text | `true` |
-| TURNSTILE_SECRET_KEY | Secret | optional, see step 6 |
+## 3. DNS (Hostinger → Domains → brilliancy-research.com → DNS)
 
-3. **Settings → Trigger Events → Cron Triggers** → add `* * * * *` (every minute). It retries calendar writes, queues reminders and sends emails.
-4. Open `https://<worker>/api/health`. Expect `configured: true`, `google_client: true`, `email_enabled: true`.
-5. Add the Worker's redirect URI (`https://<worker>/api/google/callback`) to the Google OAuth client if you have not already.
+One record only: `A` `appointment` → `187.127.210.231` (TTL 300). Leave every other record as it is.
 
-## 4. Website (Cloudflare Pages)
+## 4. Google Cloud (project "Brilliancy Appointments")
 
-1. Create `.env` from `.env.example` with `VITE_API_URL` = the Worker URL, and the Supabase URL and publishable key. Never put the secret key here.
-2. `npm install && npm run build`.
-3. Cloudflare → **Workers & Pages → Create → Pages → Upload assets**, project `brilliancy-appointments`, upload the contents of `dist/` (the `_redirects` file inside `dist/` keeps `/admin` and `/manage` working on refresh).
-4. Visit `https://brilliancy-appointments.pages.dev/`. The service list should load. If you see "The booking service is not configured yet", `VITE_API_URL` was missing at build time.
+APIs & Services → Credentials → OAuth client → **Authorised redirect URIs**: add `https://appointment.brilliancy-research.com/api/google/callback`. Branding → Authorised domains: add `brilliancy-research.com`.
 
-## 5. Connect the office calendar
+## 5. First use
 
-1. Open `https://brilliancy-appointments.pages.dev/admin` and sign in with the admin email and password from step 1.
-2. **Settings → Office Google Calendar → Connect**. Choose the office Google account (brilliancycomms@gmail.com), continue past the "unverified app" screen (Advanced → Go to Brilliancy Appointments), and tick **both** calendar permissions.
-3. You are returned to Settings showing *Connected as brilliancycomms@gmail.com*.
-4. Test: make a booking from the public page with your own email. Within a minute you should have the confirmation email, a Google Calendar invitation, the event on the office calendar, and the booking in Admin → Bookings as *Confirmed*. Cancel it from the link in the email and check the event disappears.
+1. Open `/admin` → **Create the first administrator** (enter the SETUP_CODE, your name, email and password).
+2. Settings → **Connect office Google Calendar** → choose brilliancycomms@gmail.com → Advanced → Go to Brilliancy Appointments → tick both calendar permissions.
+3. Settings → Referring employees → **Bulk add from a spreadsheet** → paste the staff list (ID, name, designation, email, phone).
+4. Make a test booking and cancel it from the email link.
 
-Events added by hand to the office calendar also block those times for clients. Keep the "Google calendar ID" setting as `primary` unless you want a separate calendar.
+## Updating
 
-## 6. Optional: spam protection
-
-Cloudflare → **Turnstile → Add site** (domain `brilliancy-appointments.pages.dev`, Managed). Put the **site key** in `.env` as `VITE_TURNSTILE_SITE_KEY` and rebuild/upload; put the **secret key** on the Worker as `TURNSTILE_SECRET_KEY`.
-
-## Updating later
-
-- Frontend change: `npm run build`, upload `dist/` to Pages again.
-- Worker change: paste the new `worker/worker.js` and deploy; keep variables and the Cron trigger.
-- Database change: run the new migration file once.
-
-## Checks and troubleshooting
-
-- `/api/health` on the Worker shows configuration state.
-- Admin → Bookings marks *Calendar pending* with a "Calendar issue" note when Google rejected or was unreachable; open the booking and press **Retry now**, or wait for the Cron.
-- Settings shows a Google error if access was revoked; press Connect again.
-- Email status: in Supabase SQL Editor, `select kind, status, attempts, last_error, created_at from public.appt_email_outbox order by id desc limit 30;` `accepted` means Brevo accepted it; check Brevo logs for actual delivery.
-- Nothing is emailed or written to Google by running the SQL or deploying; only real bookings trigger those.
+Push to the `version-3` branch, then EasyPanel → app → **Deploy** (or enable auto-deploy). The database schema updates itself on start. Back up the MySQL service from EasyPanel before big changes.
