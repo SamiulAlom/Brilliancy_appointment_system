@@ -149,6 +149,28 @@ assert.equal(pend.status, 'confirmed'); ok('cron retries calendar-pending bookin
 const rem = await db.q(`SELECT * FROM appt_email_outbox WHERE kind = 'reminder' AND booking_id = ?`, [pendingId]);
 assert.equal(rem.length, 1); assert.equal(rem[0].status, 'accepted'); ok('cron queues and sends ~24h reminders');
 
+// branded HTML emails
+assert.ok(state.mails.length && state.mails.every(m => m.htmlContent && m.htmlContent.includes('/brand/email-logo.jpg') && m.textContent)); ok('emails are branded HTML cards with a text version');
+assert.ok(!state.mails.some(m => /<script/i.test(m.htmlContent))); ok('email HTML has no scripts');
+
+// admin delete: upcoming booking is removed from calendar, client emailed, row erased
+const del = await call('POST', '/api/public/bookings', { ...form, start: sl.json.slots[10].start, idempotency_key: crypto.randomUUID(), phone: '01744444444', email: 'delete-me@example.com', name: 'Delete <Me>' });
+assert.equal(del.status, 201); await Promise.all(waits);
+const delRow = await db.one(`SELECT id, google_event_id FROM appt_bookings WHERE client_email = 'delete-me@example.com'`);
+assert.equal((await call('POST', '/api/admin/bookings/delete', { id: delRow.id })).status, 401);
+const mailsBefore = state.mails.length;
+const dr = await call('POST', '/api/admin/bookings/delete', { id: delRow.id, notify_client: true }, T);
+assert.equal(dr.status, 200); assert.equal(dr.json.emailed, true);
+assert.equal(await db.one('SELECT id FROM appt_bookings WHERE id = ?', [delRow.id]), null);
+assert.equal((await db.q('SELECT id FROM appt_email_outbox WHERE booking_id = ?', [delRow.id])).length, 0);
+assert.ok(state.deleted.some(p => p.includes(delRow.google_event_id)));
+const delMail = state.mails.slice(mailsBefore).find(m => m.to[0].email === 'delete-me@example.com');
+assert.ok(delMail && delMail.subject.startsWith('Appointment cancelled') && delMail.htmlContent.includes('Dear Delete &lt;Me&gt;,') && !delMail.htmlContent.includes('<Me>'));
+assert.ok((await db.one(`SELECT detail FROM appt_audit WHERE action = 'delete' AND booking_id = ?`, [delRow.id])).detail.includes('delete-me@example.com'));
+assert.equal((await call('POST', '/api/admin/bookings/delete', { id: delRow.id }, T)).status, 404); ok('admin can delete an appointment (calendar removed, client emailed, audited)');
+const pastDel = await call('POST', '/api/admin/bookings/delete', { id: pendingId, notify_client: false }, T);
+assert.equal(pastDel.json.emailed, false); ok('delete without emailing the client');
+
 const health = await call('GET', '/api/health');
 assert.equal(health.json.database, true); assert.equal(health.json.configured, true); ok('health check');
 await db.pool.end();

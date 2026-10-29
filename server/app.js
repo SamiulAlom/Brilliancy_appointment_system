@@ -5,6 +5,7 @@ import { randomUUID, scrypt as scryptCb, randomBytes, timingSafeEqual } from 'no
 import { promisify } from 'node:util';
 
 export const REVISION = 'appointments-3-mysql';
+import { emailContent } from './email.js';
 const ZONE = 'Asia/Dhaka';
 const OFFSET = '+06:00'; // Bangladesh has no daylight saving time.
 const ACTIVE = ['calendar_pending', 'confirmed'];
@@ -225,33 +226,22 @@ async function syncDelete(db, env, b, settings) {
 }
 
 // ---------------------------------------------------------------- email (Brevo)
-function emailContent(kind, b, settings, env, forAdmin = false) {
-  const site = (env.PUBLIC_SITE_URL || '').replace(/\/$/, '');
-  const when = fmtWhen(b.start_at) + ' (Bangladesh time)';
-  const where = b.mode === 'office' ? `Venue: Brilliancy Research, ${settings.office_address}`
-    : b.mode === 'meet' ? (b.meet_link ? `Google Meet: ${b.meet_link}` : 'Google Meet: the link is in your Google Calendar invitation.')
-    : `Phone call: we will call you on ${b.client_phone}.`;
-  const manage = b._manage ? `\nView or cancel your appointment:\n${site}/manage?token=${b._manage}\n` : '';
-  if (kind === 'confirmation') return { subject: `Appointment confirmed: ${fmtWhen(b.start_at)}`, text:
-    `Dear ${b.client_name},\n\nYour appointment with Brilliancy Research is confirmed.\n\nService: ${b.service_name}\nDate & time: ${when}\nDuration: ${b.duration_min} minutes\n${where}\n${manage}\nIf you need to change the time, cancel using the link above and book a new slot.\n\nBrilliancy Research\n${settings.office_address}` };
-  if (kind === 'reminder') return { subject: `Reminder: your appointment on ${fmtWhen(b.start_at)}`, text:
-    `Dear ${b.client_name},\n\nThis is a reminder of your appointment with Brilliancy Research.\n\nService: ${b.service_name}\nDate & time: ${when}\n${where}\n${manage}\nBrilliancy Research` };
-  if (kind === 'cancellation' && forAdmin) return { subject: `Cancelled by client: ${b.client_name} — ${fmtWhen(b.start_at)}`, text:
-    `The client cancelled this appointment. The slot is free again.\n\nService: ${b.service_name}\nWhen: ${when}\nClient: ${b.client_name}\nPhone: ${b.client_phone}\nEmail: ${b.client_email}\n\nAdmin: ${site}/admin` };
-  if (kind === 'cancellation') return { subject: `Appointment cancelled: ${fmtWhen(b.start_at)}`, text:
-    `Dear ${b.client_name},\n\nYour appointment (${b.service_name}, ${when}) has been cancelled.\nYou can book a new time at ${site}/\n\nBrilliancy Research` };
-  if (kind === 'referrer_alert') return { subject: `Your referral booked: ${b.client_name} — ${fmtWhen(b.start_at)}`, text:
-    `Hello,\n\nA client you referred has booked an appointment with Brilliancy Research.\n\nClient: ${b.client_name}\nService: ${b.service_name}\nWhen: ${when}\nMeeting: ${MODES[b.mode]}\n\nThank you for the referral.\nBrilliancy Research` };
-  return { subject: `New appointment: ${b.client_name} — ${fmtWhen(b.start_at)}`, text:
-    `New booking\n\nService: ${b.service_name}\nWhen: ${when}\nMeeting: ${MODES[b.mode]}\nClient: ${b.client_name}\nPhone: ${b.client_phone}\nEmail: ${b.client_email}\nInstitution: ${b.client_institution || '-'}\nReferred by: ${b._referrer}\nNote: ${b.client_note || '-'}\nCalendar: ${b.status === 'confirmed' ? 'added to Google Calendar' : 'pending (will retry automatically)'}\n\nAdmin: ${site}/admin` };
+function brevoSend(env, settings, job, b, c) {
+  return fetch('https://api.brevo.com/v3/smtp/email', { method: 'POST', redirect: 'manual', signal: AbortSignal.timeout(10000),
+    headers: { 'api-key': env.BREVO_API_KEY, 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify({ sender: { name: env.BREVO_SENDER_NAME || 'Brilliancy Research', email: env.BREVO_SENDER_EMAIL },
+      to: [{ email: job.to_email, name: job.to_name || undefined }], subject: c.subject, textContent: c.text, htmlContent: c.html,
+      replyTo: job.kind === 'admin_alert' ? { email: b.client_email, name: b.client_name } : { email: settings.notify_email },
+      headers: { idempotencyKey: job.idem_key } }) });
 }
+const emailReady = (env) => String(env.EMAIL_ENABLED).toLowerCase() === 'true' && !!env.BREVO_API_KEY && EMAIL.test(env.BREVO_SENDER_EMAIL || '');
 async function queueEmails(db, list) {
   for (const e of list) await db.q('INSERT IGNORE INTO appt_email_outbox (booking_id, kind, to_email, to_name, idem_key) VALUES (?, ?, ?, ?, ?)', [e.booking_id, e.kind, e.to_email, e.to_name || '', randomUUID()]);
 }
 let emailRun = null;
 export function processEmails(db, env) { emailRun ??= sendEmails(db, env).finally(() => { emailRun = null; }); return emailRun; }
 async function sendEmails(db, env) {
-  if (String(env.EMAIL_ENABLED).toLowerCase() !== 'true' || !env.BREVO_API_KEY || !EMAIL.test(env.BREVO_SENDER_EMAIL || '')) return 0;
+  if (!emailReady(env)) return 0;
   const jobs = await db.q(`SELECT * FROM appt_email_outbox WHERE status = 'pending' AND not_before <= CURRENT_TIMESTAMP(3) ORDER BY id LIMIT 10`);
   if (!jobs.length) return 0;
   const settings = await loadSettings(db);
@@ -268,12 +258,7 @@ async function sendEmails(db, env) {
         b._manage = await manageToken(env, b.idempotency_key);
         b._referrer = await referrerLabel(db, b);
         const c = emailContent(job.kind, b, settings, env, job.to_email !== b.client_email);
-        const res = await fetch('https://api.brevo.com/v3/smtp/email', { method: 'POST', redirect: 'manual', signal: AbortSignal.timeout(10000),
-          headers: { 'api-key': env.BREVO_API_KEY, 'Content-Type': 'application/json', Accept: 'application/json' },
-          body: JSON.stringify({ sender: { name: env.BREVO_SENDER_NAME || 'Brilliancy Research', email: env.BREVO_SENDER_EMAIL },
-            to: [{ email: job.to_email, name: job.to_name || undefined }], subject: c.subject, textContent: c.text,
-            replyTo: job.kind === 'admin_alert' ? { email: b.client_email, name: b.client_name } : { email: settings.notify_email },
-            headers: { idempotencyKey: job.idem_key } }) });
+        const res = await brevoSend(env, settings, job, b, c);
         const result = await res.json().catch(() => null);
         if (res.ok) { status = 'accepted'; sent++; }
         else if (result?.code === 'duplicate_parameter') { status = 'accepted'; error = 'Previously accepted by Brevo.'; }
@@ -517,6 +502,26 @@ async function adminUpdateBooking(db, env, admin, body, later) {
   }
   return { booking: adminView(await getBooking(db, b.id)) };
 }
+// Permanently remove a booking. An upcoming one is first taken off Google Calendar and,
+// if asked, the client gets the cancellation email before the record is erased.
+async function adminDeleteBooking(db, env, admin, body) {
+  if (!UUID.test(body.id || '')) fail(400, 'INVALID_INPUT', 'Unknown booking.');
+  const b = await getBooking(db, body.id);
+  if (!b) fail(404, 'NOT_FOUND', 'Booking not found. It may already be deleted.');
+  const settings = await loadSettings(db);
+  const upcoming = ACTIVE.includes(b.status) && Date.parse(b.start_at) > Date.now();
+  let emailed = false;
+  if (b.google_event_id) await syncDelete(db, env, b, settings);
+  if (upcoming && body.notify_client !== false && emailReady(env)) {
+    const c = emailContent('cancellation', { ...b, cancelled_by: 'admin' }, settings, env);
+    const res = await brevoSend(env, settings, { kind: 'cancellation', to_email: b.client_email, to_name: b.client_name, idem_key: randomUUID() }, b, c).catch(() => null);
+    emailed = !!res?.ok;
+  }
+  await db.q('DELETE FROM appt_email_outbox WHERE booking_id = ?', [b.id]);
+  await db.q('DELETE FROM appt_bookings WHERE id = ?', [b.id]);
+  await audit(db, admin.id, 'delete', b.id, { client: b.client_name, email: b.client_email, start_at: b.start_at, service: b.service_name, status: b.status, emailed });
+  return { deleted: true, emailed };
+}
 async function referralReport(db, url) {
   const { from, to } = dateRange(url);
   const rows = await db.q(`SELECT b.referrer_code, r.full_name,
@@ -682,6 +687,7 @@ export async function handle(db, env, req, later = (p) => p.catch(() => {})) {
     if (r === 'me') return ok({ admin });
     if (r === 'bookings') { need('GET'); return ok(await adminBookings(db, req.url)); }
     if (r === 'bookings/update') { need('POST'); return ok(await adminUpdateBooking(db, env, admin, req.body, later)); }
+    if (r === 'bookings/delete') { need('POST'); return ok(await adminDeleteBooking(db, env, admin, req.body)); }
     if (r === 'client-history') { need('GET'); return ok(await clientHistory(db, req.url)); }
     if (r === 'referrals') { need('GET'); return ok(await referralReport(db, req.url)); }
     if (r === 'settings') { if (req.method === 'GET') return ok(await adminSettings(db, env)); need('POST'); return ok(await saveSettings(db, admin, req.body)); }

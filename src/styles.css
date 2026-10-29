@@ -60,7 +60,7 @@ label.check { flex-direction: row; align-items: center; gap: 8px; font-weight: 5
 label.check input { width: 18px; height: 18px; accent-color: var(--action); }
 label.check.self { flex-direction: row-reverse; justify-content: flex-start; align-self: end; padding-bottom: 10px; }
 .confirm-box { background: var(--tint); border-radius: 10px; padding: 16px; margin: 14px 0; display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
-.confirm-box p { width: 100%; margin: 0; color: var(--hover); font-weight: 500; }
+.confirm-box p, .confirm-box label { width: 100%; margin: 0; color: var(--hover); font-weight: 500; }
 
 /* ---- booking page ---- */
 .book-shell { display: grid; grid-template-columns: minmax(280px, 360px) minmax(0, 1fr); min-height: 100vh; }

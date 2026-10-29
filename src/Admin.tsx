@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react';
-import { BarChart3, CalendarDays, Copy, History, Link2, LogOut, MessageCircle, RefreshCw, Settings2, Users } from 'lucide-react';
+import { BarChart3, CalendarDays, Copy, History, Link2, LogOut, MessageCircle, RefreshCw, Settings2, Trash2, Users } from 'lucide-react';
 import Analytics from './Analytics';
 import Brand from './Brand';
 import { api, type Mode, type OffDay, type Service } from './lib/api';
@@ -139,12 +139,19 @@ function Bookings({ token }: { token: string }) {
         <td>{fmtDateTime(b.start_at)}</td><td><strong>{b.client_name}</strong><br/><small>{b.client_phone}</small></td><td>{b.service_name}</td><td>{MODE[b.mode]}</td><td>{b.referrer_label}</td>
         <td><span className={`pill ${b.status}`}>{STATUS[b.status]}</span>{b.calendar_error && <small className="warn" title={b.calendar_error}>Calendar issue</small>}</td>
       </tr>)}</tbody></table></div>}
-    {open && <BookingDrawer token={token} booking={open} onClose={() => setOpen(null)} onSaved={b => { setRows(rows => rows?.map(x => x.id === b.id ? { ...x, ...b } : x) || null); setOpen(o => o && { ...o, ...b }); }}/>}
+    {open && <BookingDrawer token={token} booking={open} onClose={() => setOpen(null)} onSaved={b => { setRows(rows => rows?.map(x => x.id === b.id ? { ...x, ...b } : x) || null); setOpen(o => o && { ...o, ...b }); }}
+      onDeleted={id => { setRows(rows => rows?.filter(x => x.id !== id) || null); setOpen(null); }}/>}
   </section>;
 }
 
-function BookingDrawer({ token, booking: b, onClose, onSaved }: { token: string; booking: Booking; onClose: () => void; onSaved: (b: Partial<Booking> & { id: string }) => void }) {
+function BookingDrawer({ token, booking: b, onClose, onSaved, onDeleted }: { token: string; booking: Booking; onClose: () => void; onSaved: (b: Partial<Booking> & { id: string }) => void; onDeleted: (id: string) => void }) {
   const [note, setNote] = useState(b.internal_note); const [busy, setBusy] = useState(''); const [error, setError] = useState(''); const [confirmCancel, setConfirmCancel] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false); const [notify, setNotify] = useState(true);
+  const remove = async () => {
+    setBusy('delete'); setError('');
+    try { await api('/api/admin/bookings/delete', { method: 'POST', token, body: JSON.stringify({ id: b.id, notify_client: notify }) }); onDeleted(b.id); }
+    catch (e) { setError((e as Error).message); setBusy(''); }
+  };
   const update = async (body: Record<string, unknown>, label: string) => {
     setBusy(label); setError('');
     try { const r = await api<{ booking: Booking }>('/api/admin/bookings/update', { method: 'POST', token, body: JSON.stringify({ id: b.id, ...body }) }); onSaved(r.booking); setConfirmCancel(false); }
@@ -194,6 +201,11 @@ function BookingDrawer({ token, booking: b, onClose, onSaved }: { token: string;
     {confirmCancel && <div className="confirm-box"><p>Cancel this appointment? The client is emailed and the calendar event is removed.</p>
       <button className="danger" disabled={!!busy} onClick={() => update({ status: 'cancelled' }, 'cancel')}>{busy === 'cancel' ? 'Cancelling…' : 'Yes, cancel it'}</button>
       <button className="link" onClick={() => setConfirmCancel(false)}>Keep it</button></div>}
+    {!confirmDelete && <div className="actions"><button className="danger" disabled={!!busy} onClick={() => setConfirmDelete(true)}><Trash2 size={15}/> Delete appointment</button></div>}
+    {confirmDelete && <div className="confirm-box"><p><strong>Delete this appointment permanently?</strong> It is removed from the admin list, reports and the office Google Calendar. This cannot be undone.</p>
+      {active && new Date(b.start_at) > new Date() && <label className="check"><input type="checkbox" checked={notify} onChange={e => setNotify(e.target.checked)}/> Email the client that it is cancelled</label>}
+      <button className="danger" disabled={!!busy} onClick={remove}>{busy === 'delete' ? 'Deleting…' : 'Yes, delete it'}</button>
+      <button className="link" onClick={() => setConfirmDelete(false)}>Keep it</button></div>}
     {error && <p className="alert">{error}</p>}
   </aside></div>;
 }
