@@ -8,8 +8,6 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview --host 127.0.0.1",
     "test": "node scripts/test-server.mjs",
-    "test:database": "node scripts/test-database.mjs",
-    "test:worker": "node scripts/test-worker.mjs",
     "start": "node server/index.js"
   },
   "dependencies": {

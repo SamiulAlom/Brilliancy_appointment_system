@@ -47,4 +47,19 @@ APIs & Services → Credentials → OAuth client → **Authorised redirect URIs*
 
 ## Updating
 
-Push to the `version-3` branch, then EasyPanel → app → **Deploy** (or enable auto-deploy). The database schema updates itself on start. Back up the MySQL service from EasyPanel before big changes.
+Push to the `version-3` branch. GitHub Actions tests it and deploys automatically (see "Automatic deployment" above). The database schema updates itself on start. Back up the MySQL service from EasyPanel before big changes.
+
+## Automatic deployment (CI/CD)
+
+`.github/workflows/deploy.yml` runs on every push to `version-3`:
+
+1. **Tests and build** — all server tests against a real MySQL 8.4 database (Google and Brevo mocked), then the TypeScript check and website build.
+2. **Deploy** — only if step 1 passes: calls EasyPanel's deploy trigger, then waits until `/api/health` reports healthy.
+
+One-time setup:
+
+1. EasyPanel → appointments → web → **Deployments** → copy the **Deployment Trigger** URL. Replace `http://187.127.210.231:3000` at the start with `https://nxazkl.easypanel.host` (same token, over HTTPS).
+2. GitHub → repository → **Settings → Secrets and variables → Actions → New repository secret**: name `EASYPANEL_DEPLOY_URL`, value = that URL.
+3. Leave EasyPanel's own "auto deploy" off, so only tested code is deployed.
+
+Status of every run: GitHub → **Actions**. A failed test stops the deploy; the live site keeps running the previous version. To redeploy without a code change: Actions → *Test and deploy* → **Run workflow**. If the deploy URL is ever exposed, use **Refresh Deploy Token** in EasyPanel and update the secret.

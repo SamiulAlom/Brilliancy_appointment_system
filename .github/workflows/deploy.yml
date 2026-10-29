@@ -1,0 +1,80 @@
+# CI/CD: every push to version-3 is tested against a real MySQL database and built.
+# Only when everything passes is EasyPanel told to deploy, so a broken change never goes live.
+name: Test and deploy
+
+on:
+  push:
+    branches: [version-3]
+  pull_request:
+    branches: [version-3]
+  workflow_dispatch: {}          # "Run workflow" button in GitHub → Actions
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false      # never stop a deploy half-way; queue the next one
+
+jobs:
+  test:
+    name: Tests and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: rootpass
+          MYSQL_DATABASE: appt_test
+          MYSQL_USER: appt
+          MYSQL_PASSWORD: apptpass
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -prootpass"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Server tests (real MySQL, Google and Brevo mocked)
+        run: npm test
+        env:
+          TEST_DATABASE_URL: mysql://appt:apptpass@127.0.0.1:3306/appt_test
+      - name: Type-check and build the website
+        run: npm run build
+        env:
+          VITE_API_URL: ''
+
+  deploy:
+    name: Deploy to EasyPanel
+    needs: test
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/version-3'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    steps:
+      - name: Trigger EasyPanel deployment
+        env:
+          DEPLOY_URL: ${{ secrets.EASYPANEL_DEPLOY_URL }}
+        run: |
+          if [ -z "$DEPLOY_URL" ]; then
+            echo "::error::Add the EasyPanel deploy URL as the repository secret EASYPANEL_DEPLOY_URL (EasyPanel → appointments → web → Deployments → Deployment Trigger)."
+            exit 1
+          fi
+          curl -fsS --retry 3 --retry-delay 5 -X POST "$DEPLOY_URL" -o /dev/null
+          echo "Deployment requested for ${GITHUB_SHA::7}."
+      - name: Wait for the site to be healthy
+        env:
+          SITE_URL: ${{ vars.SITE_URL || 'https://appointment.brilliancyresearch.net' }}
+        run: |
+          sleep 45
+          for i in $(seq 1 24); do
+            body=$(curl -fsS --max-time 10 "$SITE_URL/api/health" || true)
+            if echo "$body" | grep -q '"database":true' && echo "$body" | grep -q '"configured":true'; then
+              echo "Healthy: $body"; exit 0
+            fi
+            echo "Waiting for the site ($i)…"; sleep 10
+          done
+          echo "::error::The site did not report healthy within 5 minutes. Check EasyPanel → web → Deployments and Logs."
+          exit 1
