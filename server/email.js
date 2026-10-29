@@ -121,3 +121,15 @@ export function emailContent(kind, b, settings, env, forAdmin = false) {
   const parts = { ...base, ...m, preheader: `${m.title} — ${fmtWhen(b.start_at)}` };
   return { subject: m.subject, text: textOf(parts), html: card(parts) };
 }
+
+// Password reset link for a team member or administrator.
+export function resetEmail({ name, email, url, role, minutes }, settings, env) {
+  const site = (env.PUBLIC_SITE_URL || '').replace(/\/$/, '');
+  const parts = { site, footerAddress: settings.office_address, badge: 'Password reset', badgeColor: '#1565c0',
+    greeting: `Hello ${name},`, title: 'Reset your password',
+    intro: `We received a request to reset the password for your Brilliancy Research ${role === 'team' ? 'communication team' : 'administrator'} account. Use the button below to choose a new password.`,
+    rows: [['Account', email], ['Link valid for', `${minutes} minutes, one use only`]],
+    button: { label: 'Choose a new password', url },
+    note: 'If you did not ask for this, you can ignore this email — your password will not change.' };
+  return { subject: 'Reset your Brilliancy Research password', text: textOf(parts), html: card({ ...parts, preheader: 'Reset your password' }) };
+}

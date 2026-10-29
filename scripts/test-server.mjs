@@ -208,6 +208,46 @@ assert.equal((await call('POST', '/api/admin/team', { email: 'caller@example.com
 assert.equal((await call('GET', '/api/team/me', {}, TT)).status, 403);
 assert.equal((await call('POST', '/api/team/login', { username: 'caller@example.com', password: 'caller password 1' })).status, 401); ok('deactivated team member is locked out');
 
+// bulk team accounts + temporary passwords + forced change
+const tbulk = await call('POST', '/api/admin/team/bulk', { rows: [
+  { email: 'Bulk.One@example.com', full_name: 'Bulk One', phone: '01900000001' }, { email: 'bulk.two@example.com', full_name: 'Bulk Two' },
+  { email: 'bulk.one@example.com', full_name: 'Bulk One Again' }, { email: 'second.caller@example.com', full_name: 'Caller Two' }] }, T);
+assert.equal(tbulk.status, 200); assert.equal(tbulk.json.created.length, 2); assert.equal(tbulk.json.skipped.length, 2);
+const pw1 = tbulk.json.created[0].password;
+assert.match(pw1, /^[A-HJ-NP-Za-km-z2-9]{4}-[A-HJ-NP-Za-km-z2-9]{4}-[A-HJ-NP-Za-km-z2-9]{4}$/); assert.notEqual(pw1, tbulk.json.created[1].password);
+assert.equal((await call('POST', '/api/admin/team/bulk', { rows: [{ email: 'bad', full_name: 'X' }] }, T)).status, 400);
+assert.equal((await call('POST', '/api/admin/team/bulk', { rows: [{ email: 'x@example.com', full_name: 'X Y' }] }, TT)).status, 401); ok('admin creates team accounts in bulk with unique temporary passwords');
+const bl = await call('POST', '/api/team/login', { username: 'bulk.one@example.com', password: pw1 });
+assert.equal(bl.json.must_change, true); const BT = bl.json.access_token;
+assert.equal((await call('GET', '/api/team/me', {}, BT)).json.member.must_change, true);
+assert.equal((await call('POST', '/api/team/password', { current: pw1, password: pw1 }, BT)).status, 400);
+assert.equal((await call('POST', '/api/team/password', { current: pw1, password: 'my own password 1' }, BT)).status, 200);
+assert.equal((await call('GET', '/api/team/me', {}, BT)).json.member.must_change, false); ok('first sign-in must change the temporary password');
+// admin reset
+const bulkOne = (await call('GET', '/api/admin/settings', {}, T)).json.team.find(t => t.email === 'bulk.one@example.com');
+const rs = await call('POST', '/api/admin/team/reset', { id: bulkOne.id }, T);
+assert.equal(rs.status, 200); assert.equal((await call('POST', '/api/team/login', { username: 'bulk.one@example.com', password: 'my own password 1' })).status, 401);
+assert.equal((await call('POST', '/api/team/login', { username: 'bulk.one@example.com', password: rs.json.member.password })).json.must_change, true); ok('admin password reset issues a new temporary password');
+// forgot password by email (team and admin)
+const mailsB = state.mails.length;
+assert.equal((await call('POST', '/api/auth/forgot', { role: 'team', email: 'nobody@example.com' })).json.ok, true);
+assert.equal(state.mails.length, mailsB); ok('forgot password does not reveal unknown emails');
+assert.equal((await call('POST', '/api/auth/forgot', { role: 'team', email: 'Bulk.Two@example.com' })).status, 200);
+const rmail = state.mails[state.mails.length - 1];
+assert.ok(rmail.subject.startsWith('Reset your') && rmail.to[0].email === 'bulk.two@example.com' && rmail.htmlContent.includes('/brand/email-logo.jpg'));
+const rtoken = decodeURIComponent(/\/team\?reset=([A-Za-z0-9_.-]+)/.exec(rmail.textContent)[1]);
+assert.equal((await call('POST', '/api/auth/reset', { token: rtoken, password: 'short' })).status, 400);
+assert.equal((await call('POST', '/api/auth/reset', { token: rtoken.slice(0, -2) + 'xx', password: 'brand new password' })).status, 400);
+assert.equal((await call('POST', '/api/auth/reset', { token: rtoken, password: 'brand new password' })).json.role, 'team');
+assert.equal((await call('POST', '/api/auth/reset', { token: rtoken, password: 'another new password' })).status, 400);
+const after = await call('POST', '/api/team/login', { username: 'bulk.two@example.com', password: 'brand new password' });
+assert.equal(after.status, 200); assert.equal(after.json.must_change, false); ok('emailed reset link works once and sets a new password');
+await call('POST', '/api/auth/forgot', { role: 'admin', email: 'second@example.com' });
+const amail = state.mails[state.mails.length - 1]; assert.ok(amail.textContent.includes('/admin?reset='));
+const atoken = /\/admin\?reset=([A-Za-z0-9_.-]+)/.exec(amail.textContent)[1];
+assert.equal((await call('POST', '/api/auth/reset', { token: atoken, password: 'admin reset password' })).json.role, 'admin');
+assert.equal((await call('POST', '/api/auth/login', { username: 'second@example.com', password: 'admin reset password' })).status, 200); ok('administrators can reset a forgotten password too');
+
 const health = await call('GET', '/api/health');
 assert.equal(health.json.database, true); assert.equal(health.json.configured, true); ok('health check');
 await db.pool.end();

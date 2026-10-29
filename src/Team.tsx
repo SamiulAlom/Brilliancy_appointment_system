@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
 import { AlarmClock, Award, Building2, CalendarDays, CalendarRange, CheckCircle2, ClipboardList, KeyRound, LogOut, Mail, MessageCircle, Phone, PhoneCall, PhoneMissed, RefreshCw, Search, UserCheck, Video } from 'lucide-react';
 import Brand from './Brand';
-import SignIn from './SignIn';
+import SignIn, { Frame } from './SignIn';
 import { api, type Mode } from './lib/api';
 import { addDays, dhakaDate, fmtDateTime, fmtDay, fmtTime } from './lib/time';
 
@@ -9,7 +9,7 @@ type TBooking = { id: string; start_at: string; end_at: string; duration_min: nu
   client_name: string; client_phone: string; client_email: string; client_institution: string; client_note: string; created_at: string; referrer_label: string;
   follow_status: string; follow_up_at: string | null; last_contact_at: string | null; assigned_to: string | null; assigned_name: string | null };
 type Activity = { id: number; actor_type: string; actor_name: string; outcome: string | null; follow_status: string | null; follow_up_at: string | null; note: string | null; created_at: string };
-type Member = { id: string; full_name: string; email?: string };
+type Member = { id: string; full_name: string; email?: string; must_change?: boolean };
 type View = 'due' | 'today' | 'upcoming' | 'range';
 type Payload = { bookings: TBooking[]; members: Member[]; follow_labels: Record<string, string>; outcome_labels: Record<string, string> };
 
@@ -40,6 +40,7 @@ export default function Team() {
   }, [token]);
   useEffect(() => { document.title = 'Communication team · Brilliancy Research'; }, []);
   if (!token || !me) return <SignIn initial="team" error={authError} onToken={(_r, t) => setToken(t)}/>;
+  if (me.must_change) return <FirstPassword token={token} me={me} onDone={() => setMe({ ...me, must_change: false })} signOut={() => setToken(null)}/>;
   return <Portal token={token} me={me} signOut={() => setToken(null)}/>;
 }
 
@@ -255,4 +256,27 @@ function PasswordDialog({ token, onClose }: { token: string; onClose: () => void
       <button className="primary" disabled={busy}>{busy ? 'Saving…' : 'Change password'}</button>
     </form>
   </aside></div>;
+}
+
+// First sign-in with a temporary password: the member must choose their own before seeing any client data.
+function FirstPassword({ token, me, onDone, signOut }: { token: string; me: Member; onDone: () => void; signOut: () => void }) {
+  const [f, setF] = useState({ current: '', password: '', confirm: '' }); const [err, setErr] = useState(''); const [busy, setBusy] = useState(false);
+  async function submit(e: FormEvent) {
+    e.preventDefault(); setErr('');
+    if (f.password !== f.confirm) { setErr('The new passwords do not match.'); return; }
+    setBusy(true);
+    try { await api('/api/team/password', { method: 'POST', token, body: JSON.stringify({ current: f.current, password: f.password }) }); onDone(); }
+    catch (e2) { setErr((e2 as Error).message); setBusy(false); }
+  }
+  return <Frame team><form className="signin-card" onSubmit={submit}>
+    <span className="big-icon"><KeyRound size={26}/></span>
+    <h2>Welcome, {me.full_name.split(' ')[0]}</h2>
+    <p className="muted">You signed in with a temporary password. Choose your own password to continue — at least 10 characters.</p>
+    <label>Temporary password<input type="password" autoComplete="current-password" value={f.current} onChange={e => setF({ ...f, current: e.target.value })} required/></label>
+    <label>New password<input type="password" minLength={10} autoComplete="new-password" value={f.password} onChange={e => setF({ ...f, password: e.target.value })} required/></label>
+    <label>Confirm new password<input type="password" minLength={10} autoComplete="new-password" value={f.confirm} onChange={e => setF({ ...f, confirm: e.target.value })} required/></label>
+    {err && <p className="alert" role="alert">{err}</p>}
+    <button className="primary wide-btn" disabled={busy}>{busy ? 'Saving…' : 'Save my password'}</button>
+    <button type="button" className="link back" onClick={signOut}>Sign out</button>
+  </form></Frame>;
 }

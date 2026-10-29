@@ -5,7 +5,7 @@ import { randomUUID, scrypt as scryptCb, randomBytes, timingSafeEqual } from 'no
 import { promisify } from 'node:util';
 
 export const REVISION = 'appointments-3-mysql';
-import { emailContent } from './email.js';
+import { emailContent, resetEmail } from './email.js';
 const ZONE = 'Asia/Dhaka';
 const OFFSET = '+06:00'; // Bangladesh has no daylight saving time.
 const ACTIVE = ['calendar_pending', 'confirmed'];
@@ -227,6 +227,13 @@ async function syncDelete(db, env, b, settings) {
 }
 
 // ---------------------------------------------------------------- email (Brevo)
+function sendMail(env, { to_email, to_name, subject, text, html, replyTo, idem }) {
+  return fetch('https://api.brevo.com/v3/smtp/email', { method: 'POST', redirect: 'manual', signal: AbortSignal.timeout(10000),
+    headers: { 'api-key': env.BREVO_API_KEY, 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify({ sender: { name: env.BREVO_SENDER_NAME || 'Brilliancy Research', email: env.BREVO_SENDER_EMAIL },
+      to: [{ email: to_email, name: to_name || undefined }], subject, textContent: text, htmlContent: html, replyTo,
+      headers: { idempotencyKey: idem || randomUUID() } }) });
+}
 function brevoSend(env, settings, job, b, c) {
   return fetch('https://api.brevo.com/v3/smtp/email', { method: 'POST', redirect: 'manual', signal: AbortSignal.timeout(10000),
     headers: { 'api-key': env.BREVO_API_KEY, 'Content-Type': 'application/json', Accept: 'application/json' },
@@ -483,7 +490,8 @@ async function authTeam(db, env, header) {
   if (!m || !(await verifySig(env, 'team:' + m[1], m[2]))) fail(401, 'SIGN_IN_REQUIRED', 'Please sign in.');
   let s; try { s = JSON.parse(Buffer.from(m[1], 'base64url').toString()); } catch { fail(401, 'SIGN_IN_REQUIRED', 'Please sign in.'); }
   if (!(s.e > Date.now())) fail(401, 'SESSION_EXPIRED', 'Your session has expired. Please sign in again.');
-  const member = await db.one('SELECT id, full_name, email, phone FROM appt_team WHERE id = ? AND active = 1', [s.t]);
+  const member = await db.one('SELECT id, full_name, email, phone, must_change FROM appt_team WHERE id = ? AND active = 1', [s.t]);
+  if (member) member.must_change = bool(member.must_change);
   if (!member) fail(403, 'TEAM_REQUIRED', 'Your team account is not active. Ask an administrator.');
   return member;
 }
@@ -491,11 +499,11 @@ async function teamLogin(db, env, body, ip) {
   limit('team-login:' + ip, 10, 15 * 60e3);
   const email = typeof body.username === 'string' ? body.username.trim().toLowerCase() : '';
   if (!EMAIL.test(email) || typeof body.password !== 'string' || !body.password || body.password.length > 256) fail(400, 'INVALID_LOGIN', 'Enter your email address and password.');
-  const t = await db.one('SELECT id, password_hash FROM appt_team WHERE email = ? AND active = 1', [email]);
+  const t = await db.one('SELECT id, password_hash, must_change FROM appt_team WHERE email = ? AND active = 1', [email]);
   const good = await checkPassword(body.password, t?.password_hash);
   if (!t || !good) fail(401, 'INVALID_CREDENTIALS', 'Invalid email or password.');
   await db.q('UPDATE appt_team SET last_login_at = CURRENT_TIMESTAMP(3) WHERE id = ?', [t.id]);
-  return { access_token: await issueTeamSession(env, t.id) };
+  return { access_token: await issueTeamSession(env, t.id), must_change: bool(t.must_change) };
 }
 // What the team sees: contact details and booking facts, never admin-only notes or tokens.
 function teamView(b, refs, team) {
@@ -563,7 +571,8 @@ async function teamPassword(db, member, body) {
   const t = await db.one('SELECT password_hash FROM appt_team WHERE id = ?', [member.id]);
   if (!(await checkPassword(String(body.current || ''), t?.password_hash))) fail(403, 'INVALID_CREDENTIALS', 'Your current password is not correct.');
   if (typeof body.password !== 'string' || body.password.length < 10) fail(400, 'WEAK_PASSWORD', 'Use a password of at least 10 characters.');
-  await db.q('UPDATE appt_team SET password_hash = ? WHERE id = ?', [await hashPassword(body.password), member.id]);
+  if (body.password === body.current) fail(400, 'SAME_PASSWORD', 'Choose a password different from the current one.');
+  await db.q('UPDATE appt_team SET password_hash = ?, must_change = 0 WHERE id = ?', [await hashPassword(body.password), member.id]);
   return { ok: true };
 }
 async function saveTeamMember(db, admin, body) {
@@ -584,6 +593,80 @@ async function saveTeamMember(db, admin, body) {
   }
   await audit(db, admin.id, 'team_save', null, { email });
   return { ok: true };
+}
+
+// Temporary passwords: 12 characters from an alphabet without look-alikes (no 0/O, 1/l/I), grouped for reading aloud.
+const PW_CHARS = 'ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789';
+export function tempPassword() {
+  const bytes = randomBytes(12); let out = '';
+  for (let i = 0; i < 12; i++) out += PW_CHARS[bytes[i] % PW_CHARS.length] + (i === 3 || i === 7 ? '-' : '');
+  return out;
+}
+// Create many team accounts at once. Each gets a temporary password (shown to the admin once) and must change it at first sign-in.
+async function bulkTeam(db, admin, body) {
+  if (!Array.isArray(body.rows) || !body.rows.length || body.rows.length > 200) fail(400, 'INVALID_INPUT', 'Choose between 1 and 200 people.');
+  const rows = body.rows.map((r, i) => {
+    const email = str(r.email, 200, { min: 5, name: `email on row ${i + 1}` }).toLowerCase();
+    if (!EMAIL.test(email)) fail(400, 'INVALID_INPUT', `Check the email on row ${i + 1}.`);
+    return { email, full_name: str(r.full_name, 120, { min: 2, name: `name on row ${i + 1}` }), phone: str(r.phone, 30, { name: 'phone' }) || null };
+  });
+  const created = [], skipped = [], seen = new Set();
+  for (const r of rows) {
+    if (seen.has(r.email)) { skipped.push({ ...r, reason: 'Listed twice' }); continue; }
+    seen.add(r.email);
+    if (await db.one('SELECT id FROM appt_team WHERE email = ?', [r.email])) { skipped.push({ ...r, reason: 'Already has an account' }); continue; }
+    const password = tempPassword();
+    await db.q('INSERT INTO appt_team (id, email, full_name, phone, password_hash, must_change) VALUES (?, ?, ?, ?, ?, 1)', [randomUUID(), r.email, r.full_name, r.phone, await hashPassword(password)]);
+    created.push({ ...r, password });
+  }
+  await audit(db, admin.id, 'team_bulk', null, { created: created.length, skipped: skipped.length });
+  return { created, skipped };
+}
+async function resetTeamPassword(db, admin, body) {
+  if (!UUID.test(body.id || '')) fail(400, 'INVALID_INPUT', 'Unknown team member.');
+  const t = await db.one('SELECT id, email, full_name, phone FROM appt_team WHERE id = ?', [body.id]);
+  if (!t) fail(404, 'NOT_FOUND', 'Team member not found.');
+  const password = tempPassword();
+  await db.q('UPDATE appt_team SET password_hash = ?, must_change = 1, active = 1 WHERE id = ?', [await hashPassword(password), t.id]);
+  await audit(db, admin.id, 'team_reset', null, { email: t.email });
+  return { member: { email: t.email, full_name: t.full_name, phone: t.phone, password } };
+}
+
+// "Forgot password?" for team members and administrators: an emailed link, signed and valid for 60 minutes.
+// The link carries a fingerprint of the current password hash, so it stops working once the password changes (one use).
+const RESET_MIN = 60;
+const ROLE_TABLE = { team: 'appt_team', admin: 'appt_admins' };
+async function forgotPassword(db, env, body, ip) {
+  limit('forgot:' + ip, 5, 15 * 60e3);
+  const role = body.role === 'admin' ? 'admin' : 'team';
+  const email = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
+  if (!EMAIL.test(email)) fail(400, 'INVALID_INPUT', 'Enter your email address.');
+  limit('forgot-email:' + email, 3, 60 * 60e3);
+  const u = await db.one(`SELECT id, full_name, email, password_hash FROM ${ROLE_TABLE[role]} WHERE email = ? AND active = 1`, [email]);
+  if (u && emailReady(env)) {
+    const payload = b64url(enc.encode(JSON.stringify({ r: role, id: u.id, e: Date.now() + RESET_MIN * 60e3, h: (await sha256(u.password_hash)).slice(0, 16) })));
+    const token = payload + '.' + await sign(env, 'reset:' + payload);
+    const site = (env.PUBLIC_SITE_URL || '').replace(/\/$/, '');
+    const url = `${site}/${role === 'team' ? 'team' : 'admin'}?reset=${token}`;
+    const c = resetEmail({ name: u.full_name, email: u.email, url, role, minutes: RESET_MIN }, await loadSettings(db), env);
+    const res = await sendMail(env, { to_email: u.email, to_name: u.full_name, ...c }).catch(() => null);
+    await audit(db, null, 'password_reset_requested', null, { role, email, sent: !!res?.ok });
+  }
+  return { ok: true };   // same answer whether or not the account exists
+}
+async function resetPassword(db, env, body, ip) {
+  limit('reset:' + ip, 10, 15 * 60e3);
+  const m = /^([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)$/.exec(typeof body.token === 'string' ? body.token : '');
+  const bad = () => fail(400, 'INVALID_RESET', 'This reset link is invalid or has expired. Ask for a new one.');
+  if (!m || !(await verifySig(env, 'reset:' + m[1], m[2]))) bad();
+  let p; try { p = JSON.parse(Buffer.from(m[1], 'base64url').toString()); } catch { bad(); }
+  if (!(p.e > Date.now()) || !ROLE_TABLE[p.r]) bad();
+  const u = await db.one(`SELECT id, password_hash FROM ${ROLE_TABLE[p.r]} WHERE id = ? AND active = 1`, [p.id]);
+  if (!u || (await sha256(u.password_hash)).slice(0, 16) !== p.h) bad();
+  if (typeof body.password !== 'string' || body.password.length < 10) fail(400, 'WEAK_PASSWORD', 'Use a password of at least 10 characters.');
+  await db.q(`UPDATE ${ROLE_TABLE[p.r]} SET password_hash = ?${p.r === 'team' ? ', must_change = 0' : ''} WHERE id = ?`, [await hashPassword(body.password), u.id]);
+  await audit(db, p.r === 'admin' ? u.id : null, 'password_reset', null, { role: p.r });
+  return { ok: true, role: p.r };
 }
 
 // ---------------------------------------------------------------- admin routes
@@ -658,12 +741,12 @@ async function adminSettings(db, env) {
   const [settings, services, offDays, google, referrers, admins] = await Promise.all([loadSettings(db), db.q('SELECT * FROM appt_services ORDER BY sort_order, name'),
     futureOffDays(db, addDays(dhakaDate(Date.now()), -30)), googleRow(db), db.q('SELECT * FROM appt_referrers ORDER BY full_name'),
     db.q('SELECT id, email, full_name, active FROM appt_admins ORDER BY full_name')]);
-  const team = await db.q('SELECT id, email, full_name, phone, active, last_login_at FROM appt_team ORDER BY full_name');
+  const team = await db.q('SELECT id, email, full_name, phone, active, must_change, last_login_at FROM appt_team ORDER BY full_name');
   return { settings, services: services.map(mapService), off_days: offDays,
     google: { connected: !!google.refresh_token_enc, email: google.google_email, connected_at: iso(google.connected_at), last_ok_at: iso(google.last_ok_at), last_error: google.last_error,
       redirect_uri: (env.PUBLIC_SITE_URL || '').replace(/\/$/, '') + '/api/google/callback' },
     referrers: referrers.map(mapRef), admins: admins.map(a => ({ ...a, active: bool(a.active) })),
-    team: team.map(t => ({ ...t, active: bool(t.active), last_login_at: iso(t.last_login_at) })) };
+    team: team.map(t => ({ ...t, active: bool(t.active), must_change: bool(t.must_change), last_login_at: iso(t.last_login_at) })) };
 }
 async function saveSettings(db, admin, b) {
   const days = Array.isArray(b.working_days) ? [...new Set(b.working_days.map(Number))] : [];
@@ -804,6 +887,8 @@ export async function handle(db, env, req, later = (p) => p.catch(() => {})) {
   if (p === '/api/auth/login') { need('POST'); return ok(await login(db, env, req.body, req.ip)); }
   if (p === '/api/auth/setup-status') { need('GET'); const c = await db.one('SELECT COUNT(*) AS n FROM appt_admins'); return ok({ needs_setup: Number(c.n) === 0 }); }
   if (p === '/api/auth/setup') { need('POST'); return ok(await setup(db, env, req.body, req.ip)); }
+  if (p === '/api/auth/forgot') { need('POST'); return ok(await forgotPassword(db, env, req.body, req.ip)); }
+  if (p === '/api/auth/reset') { need('POST'); return ok(await resetPassword(db, env, req.body, req.ip)); }
   if (p === '/api/team/login') { need('POST'); return ok(await teamLogin(db, env, req.body, req.ip)); }
   if (p.startsWith('/api/team/')) {
     const member = await authTeam(db, env, req.headers.authorization);
@@ -825,6 +910,8 @@ export async function handle(db, env, req, later = (p) => p.catch(() => {})) {
     if (r === 'bookings/delete') { need('POST'); return ok(await adminDeleteBooking(db, env, admin, req.body)); }
     if (r === 'activity') { if (req.method === 'GET') return ok(await activityFor(db, req.url.searchParams.get('booking_id'))); need('POST'); return ok(await logActivity(db, { type: 'admin', id: admin.id, name: admin.full_name }, req.body)); }
     if (r === 'team') { need('POST'); return ok(await saveTeamMember(db, admin, req.body)); }
+    if (r === 'team/bulk') { need('POST'); return ok(await bulkTeam(db, admin, req.body)); }
+    if (r === 'team/reset') { need('POST'); return ok(await resetTeamPassword(db, admin, req.body)); }
     if (r === 'client-history') { need('GET'); return ok(await clientHistory(db, req.url)); }
     if (r === 'referrals') { need('GET'); return ok(await referralReport(db, req.url)); }
     if (r === 'settings') { if (req.method === 'GET') return ok(await adminSettings(db, env)); need('POST'); return ok(await saveSettings(db, admin, req.body)); }

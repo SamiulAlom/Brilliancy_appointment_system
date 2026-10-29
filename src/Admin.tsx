@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react';
-import { BarChart3, CalendarDays, Copy, History, Link2, LogOut, MessageCircle, Phone, RefreshCw, Settings2, Trash2, Users } from 'lucide-react';
+import { BarChart3, CalendarDays, Copy, FileText, History, KeyRound, Link2, LogOut, MessageCircle, Phone, Printer, RefreshCw, Settings2, Trash2, Users } from 'lucide-react';
 import Analytics from './Analytics';
 import { FOLLOW, OUTCOME } from './Team';
 import Brand from './Brand';
 import SignIn from './SignIn';
+import { downloadCsv, downloadWord, printCredentials, type Credential } from './credentials';
 import { api, type Mode, type OffDay, type Service } from './lib/api';
 import { addDays, DAY_NAMES, dhakaDate, fmtDateTime } from './lib/time';
 
@@ -14,7 +15,7 @@ type Referrer = { code: string; full_name: string; designation: string; email: s
 type AdminRow = { id: string; email: string; full_name: string; active: boolean };
 type SettingsPayload = { settings: Record<string, unknown> & { open_time: string; close_time: string; working_days: number[]; slot_step_min: number; min_notice_min: number; max_days_ahead: number; modes: Mode[]; office_address: string; calendar_id: string; notify_email: string };
   services: Service[]; off_days: OffDay[]; google: { connected: boolean; email: string | null; connected_at: string | null; last_ok_at: string | null; last_error: string | null; redirect_uri: string }; referrers: Referrer[]; admins?: AdminRow[]; team?: TeamRow[] };
-type TeamRow = { id: string; email: string; full_name: string; phone: string | null; active: boolean; last_login_at: string | null };
+type TeamRow = { id: string; email: string; full_name: string; phone: string | null; active: boolean; must_change?: boolean; last_login_at: string | null };
 type Activity = { id: number; actor_type: string; actor_name: string; outcome: string | null; follow_status: string | null; follow_up_at: string | null; note: string | null; created_at: string };
 type ReportRow = { referrer_code: string | null; full_name: string | null; referrer_label: string; total: number; upcoming: number; completed: number; no_show: number; cancelled: number };
 type Tab = 'bookings' | 'analytics' | 'referrals' | 'settings';
@@ -292,7 +293,7 @@ function SettingsTab({ token }: { token: string }) {
     <div className="card">
       <h2>Communication team</h2>
       <p className="muted">People who sign in at <a href="/team" target="_blank" rel="noreferrer">{location.host}/team</a> to see booked slots, call clients and log follow-ups. They cannot change settings, cancel or delete bookings.</p>
-      <TeamEditor team={data.team || []} busy={!!busy} onSave={t => post('/api/admin/team', t, 'team')}/>
+      <TeamEditor token={token} team={data.team || []} referrers={data.referrers} busy={!!busy} onSave={t => post('/api/admin/team', t, 'team')} reload={load}/>
     </div>
 
     <div className="card">
@@ -390,22 +391,85 @@ function PasswordForm({ busy, onSave }: { busy: boolean; onSave: (b: { current: 
     <button className="primary" disabled={busy}>Change password</button> <button type="button" className="link" onClick={() => setOpen(false)}>Cancel</button></form>;
 }
 
-function TeamEditor({ team, busy, onSave }: { team: TeamRow[]; busy: boolean; onSave: (t: Record<string, unknown>) => void }) {
+function TeamEditor({ token, team, referrers, busy, onSave, reload }: { token: string; team: TeamRow[]; referrers: Referrer[]; busy: boolean; onSave: (t: Record<string, unknown>) => void; reload: () => Promise<void> | void }) {
   const [edit, setEdit] = useState<{ email: string; full_name: string; phone: string; password: string; active: boolean; isNew: boolean } | null>(null);
+  const [picking, setPicking] = useState(false); const [chosen, setChosen] = useState<Set<string>>(new Set());
+  const [creds, setCreds] = useState<{ title: string; list: Credential[]; skipped?: { email: string; full_name: string; reason: string }[] } | null>(null);
+  const [working, setWorking] = useState(''); const [err, setErr] = useState('');
+  const have = new Set(team.map(t => t.email.toLowerCase()));
+  const candidates = referrers.filter(r => r.active && r.email && !have.has(r.email.toLowerCase()));
+  const openPicker = () => { setChosen(new Set(candidates.map(r => r.code))); setPicking(true); setErr(''); };
+  const createChosen = async () => {
+    setWorking('bulk'); setErr('');
+    try {
+      const rows = candidates.filter(r => chosen.has(r.code)).map(r => ({ email: r.email, full_name: r.full_name, phone: r.phone }));
+      const r = await api<{ created: Credential[]; skipped: { email: string; full_name: string; reason: string }[] }>('/api/admin/team/bulk', { method: 'POST', token, body: JSON.stringify({ rows }) });
+      setPicking(false); setCreds({ title: `${r.created.length} team account${r.created.length === 1 ? '' : 's'} created`, list: r.created, skipped: r.skipped }); await reload();
+    } catch (e) { setErr((e as Error).message); } finally { setWorking(''); }
+  };
+  const reset = async (t: TeamRow) => {
+    if (!confirm(`Reset the password for ${t.full_name}? Their current password stops working and they get a new temporary one.`)) return;
+    setWorking(t.id); setErr('');
+    try { const r = await api<{ member: Credential }>('/api/admin/team/reset', { method: 'POST', token, body: JSON.stringify({ id: t.id }) }); setCreds({ title: `New password for ${t.full_name}`, list: [r.member] }); await reload(); }
+    catch (e) { setErr((e as Error).message); } finally { setWorking(''); }
+  };
   return <>
     {!team.length && <p className="muted small">No team members yet.</p>}
-    <ul className="plain">{team.map(t => <li key={t.id} className={t.active ? '' : 'off'}><strong>{t.full_name}</strong> · {t.email}{t.phone && <> · {t.phone}</>}
-      <small className="muted"> · {t.active ? (t.last_login_at ? `last signed in ${fmtDateTime(t.last_login_at)}` : 'never signed in') : 'inactive'}</small>
-      <button className="link" onClick={() => setEdit({ email: t.email, full_name: t.full_name, phone: t.phone || '', password: '', active: t.active, isNew: false })}>Edit</button></li>)}</ul>
-    {!edit && <button className="secondary" onClick={() => setEdit({ email: '', full_name: '', phone: '', password: '', active: true, isNew: true })}>Add team member</button>}
+    {!!team.length && <div className="table-wrap flat"><table className="team-table">
+      <thead><tr><th>Name</th><th>Email (username)</th><th>Phone</th><th>Status</th><th></th></tr></thead>
+      <tbody>{team.map(t => <tr key={t.id} className={t.active ? '' : 'off'}>
+        <td><strong>{t.full_name}</strong></td><td>{t.email}</td><td>{t.phone || '—'}</td>
+        <td>{!t.active ? <span className="pill cancelled">Inactive</span> : t.must_change ? <span className="pill calendar_pending" title="Has not chosen their own password yet">Temporary password</span>
+          : <span className="pill confirmed">Active</span>}<small className="muted block">{t.last_login_at ? `Signed in ${fmtDateTime(t.last_login_at)}` : 'Never signed in'}</small></td>
+        <td className="row-actions"><button className="link" disabled={!!working} onClick={() => reset(t)}><KeyRound size={14}/> {working === t.id ? 'Resetting…' : 'Reset password'}</button>
+          <button className="link" onClick={() => setEdit({ email: t.email, full_name: t.full_name, phone: t.phone || '', password: '', active: t.active, isNew: false })}>Edit</button></td>
+      </tr>)}</tbody></table></div>}
+    {err && <p className="alert">{err}</p>}
+    {!edit && !picking && <div className="btn-row">
+      <button className="primary" disabled={!candidates.length} onClick={openPicker} title={candidates.length ? '' : 'Everyone on the referring-employee list with an email already has an account'}>
+        <Users size={16}/> Create accounts from staff list{candidates.length ? ` (${candidates.length})` : ''}</button>
+      <button className="secondary" onClick={() => setEdit({ email: '', full_name: '', phone: '', password: '', active: true, isNew: true })}>Add one person</button>
+    </div>}
+    {picking && <div className="inline-form picker">
+      <div className="picker-head"><strong>Choose who gets a team account</strong>
+        <label className="check"><input type="checkbox" checked={chosen.size === candidates.length} onChange={e => setChosen(e.target.checked ? new Set(candidates.map(r => r.code)) : new Set())}/> Select all</label></div>
+      <ul className="pick-list">{candidates.map(r => <li key={r.code}><label className="check">
+        <input type="checkbox" checked={chosen.has(r.code)} onChange={e => { const n = new Set(chosen); if (e.target.checked) n.add(r.code); else n.delete(r.code); setChosen(n); }}/>
+        <span><b>{r.full_name}</b> <small className="muted">{r.designation} · {r.email}</small></span></label></li>)}</ul>
+      <p className="muted small">Each person gets a temporary password. You will get a credentials document to print or share; they must choose their own password at first sign-in.</p>
+      <button className="primary" disabled={!chosen.size || working === 'bulk'} onClick={createChosen}>{working === 'bulk' ? 'Creating…' : `Create ${chosen.size} account${chosen.size === 1 ? '' : 's'}`}</button>
+      <button className="link" onClick={() => setPicking(false)}>Cancel</button>
+    </div>}
     {edit && <form className="inline-form" onSubmit={e => { e.preventDefault(); onSave(edit); setEdit(null); }}><div className="fields">
       <label>Email<input type="email" required readOnly={!edit.isNew} value={edit.email} onChange={e => setEdit({ ...edit, email: e.target.value })}/></label>
       <label>Name<input required value={edit.full_name} onChange={e => setEdit({ ...edit, full_name: e.target.value })}/></label>
       <label>Phone<input type="tel" value={edit.phone} onChange={e => setEdit({ ...edit, phone: e.target.value })}/></label>
-      <label>{edit.isNew ? 'Password' : 'New password (optional)'}<input type="password" minLength={10} required={edit.isNew} autoComplete="new-password" value={edit.password} onChange={e => setEdit({ ...edit, password: e.target.value })}/><small>At least 10 characters. Share it with them privately.</small></label>
+      <label>{edit.isNew ? 'Password' : 'New password (optional)'}<input type="password" minLength={10} required={edit.isNew} autoComplete="new-password" value={edit.password} onChange={e => setEdit({ ...edit, password: e.target.value })}/><small>At least 10 characters. Or use “Reset password” to generate one.</small></label>
       {!edit.isNew && <label className="check self">Can sign in<input type="checkbox" checked={edit.active} onChange={e => setEdit({ ...edit, active: e.target.checked })}/></label>}
     </div><button className="primary" disabled={busy}>Save team member</button> <button type="button" className="link" onClick={() => setEdit(null)}>Cancel</button></form>}
+    {creds && <CredentialsDialog {...creds} onClose={() => setCreds(null)}/>}
   </>;
+}
+
+function CredentialsDialog({ title, list, skipped, onClose }: { title: string; list: Credential[]; skipped?: { email: string; full_name: string; reason: string }[]; onClose: () => void }) {
+  const [blocked, setBlocked] = useState(false);
+  return <div className="drawer-back" onClick={e => { if (e.target === e.currentTarget && confirm('Close? The passwords will not be shown again.')) onClose(); }}>
+    <aside className="drawer creds" role="dialog" aria-label="Login credentials">
+      <span className="big-icon ok"><KeyRound size={24}/></span>
+      <h2>{title}</h2>
+      <p className="alert warnbox"><b>Save the credentials now.</b> For security, these temporary passwords are shown only once. Download the document, then hand each person their slip.</p>
+      <div className="btn-row">
+        <button className="primary" disabled={!list.length} onClick={() => downloadWord(list)}><FileText size={16}/> Download Word document</button>
+        <button className="secondary" disabled={!list.length} onClick={() => setBlocked(!printCredentials(list))}><Printer size={16}/> Print / save as PDF</button>
+        <button className="secondary" disabled={!list.length} onClick={() => downloadCsv(list)}>CSV</button>
+      </div>
+      {blocked && <p className="alert">Your browser blocked the print window. Allow pop-ups for this site, or use the Word document.</p>}
+      {!!list.length && <div className="table-wrap flat"><table><thead><tr><th>Name</th><th>Email (username)</th><th>Temporary password</th></tr></thead>
+        <tbody>{list.map(c => <tr key={c.email}><td><strong>{c.full_name}</strong></td><td>{c.email}</td><td><code className="pw">{c.password}</code></td></tr>)}</tbody></table></div>}
+      {!!skipped?.length && <p className="muted small">Skipped: {skipped.map(s => `${s.full_name} (${s.reason.toLowerCase()})`).join(', ')}.</p>}
+      <p className="muted small">Sign-in page for the team: <b>{location.origin}/team</b></p>
+      <button className="secondary" onClick={() => confirm('Have you saved the credentials? They will not be shown again.') && onClose()}>Done</button>
+    </aside></div>;
 }
 
 // Read-only view of the communication team's calls for one booking, plus a quick admin note.

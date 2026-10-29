@@ -26,6 +26,7 @@ const COLUMNS = [
   ['appt_bookings', 'follow_up_at', 'DATETIME(3) NULL'],
   ['appt_bookings', 'assigned_to', 'CHAR(36) NULL'],
   ['appt_bookings', 'last_contact_at', 'DATETIME(3) NULL'],
+  ['appt_team', 'must_change', 'TINYINT(1) NOT NULL DEFAULT 0'],
 ];
 
 export async function openDatabase(url = env.DATABASE_URL) {
