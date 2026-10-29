@@ -1,6 +1,6 @@
 # Brilliancy Research — Appointments (version 3)
 
-**Live:** https://appointment.brilliancy-research.com · Admin: https://appointment.brilliancy-research.com/admin · Health: `/api/health`
+**Live:** https://appointment.brilliancyresearch.net · Admin: https://appointment.brilliancyresearch.net/admin · Health: `/api/health`
 
 Client appointment booking for Brilliancy Research, hosted on the company's **Hostinger VPS (EasyPanel)** with a **MySQL** database. One Node.js process serves both the website and the API. No Supabase or Cloudflare.
 

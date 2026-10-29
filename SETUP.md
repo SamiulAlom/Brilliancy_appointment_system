@@ -17,7 +17,7 @@ The app runs as its own EasyPanel project, separate from every other app on the 
 | Name | Value |
 | --- | --- |
 | DATABASE_URL | the internal MySQL URL from step 1 |
-| PUBLIC_SITE_URL | `https://appointment.brilliancy-research.com` |
+| PUBLIC_SITE_URL | `https://appointment.brilliancyresearch.net` |
 | PORT | `3000` |
 | TOKEN_ENCRYPTION_KEY | 32 random bytes in base64 (keep it; changing it means reconnecting Google) |
 | SETUP_CODE | any 8+ character code, used once to create the first admin |
@@ -27,16 +27,16 @@ The app runs as its own EasyPanel project, separate from every other app on the 
 | BREVO_SENDER_NAME | `Brilliancy Research` |
 | EMAIL_ENABLED | `true` |
 
-4. **Domains**: add `appointment.brilliancy-research.com`, HTTPS on, port `3000`. EasyPanel issues the Let's Encrypt certificate once DNS points to the VPS.
-5. **Deploy**. `https://appointment.brilliancy-research.com/api/health` should show `"database":true,"configured":true`.
+4. **Domains**: add `appointment.brilliancyresearch.net`, HTTPS on, port `3000`. EasyPanel issues the Let's Encrypt certificate once DNS points to the VPS.
+5. **Deploy**. `https://appointment.brilliancyresearch.net/api/health` should show `"database":true,"configured":true`.
 
-## 3. DNS (Hostinger → Domains → brilliancy-research.com → DNS)
+## 3. DNS (Namecheap → Domain List → brilliancyresearch.net → Advanced DNS)
 
 One record only: `A` `appointment` → `187.127.210.231` (TTL 300). Leave every other record as it is.
 
 ## 4. Google Cloud (project "Brilliancy Appointments")
 
-APIs & Services → Credentials → OAuth client → **Authorised redirect URIs**: add `https://appointment.brilliancy-research.com/api/google/callback`. Branding → Authorised domains: add `brilliancy-research.com`.
+APIs & Services → Credentials → OAuth client → **Authorised redirect URIs**: add `https://appointment.brilliancyresearch.net/api/google/callback`. Branding → Authorised domains: add `brilliancyresearch.net`.
 
 ## 5. First use
 
