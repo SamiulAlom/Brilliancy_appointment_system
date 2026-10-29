@@ -291,7 +291,7 @@ function SettingsTab({ token }: { token: string }) {
 
     <div className="card">
       <h2>Communication team</h2>
-      <p className="muted">People who sign in at <a href="https://appointmentbooked.brilliancyresearch.net" target="_blank" rel="noreferrer">appointmentbooked.brilliancyresearch.net</a> to see booked slots, call clients and log follow-ups. They cannot change settings, cancel or delete bookings.</p>
+      <p className="muted">People who sign in at <a href="/team" target="_blank" rel="noreferrer">{location.host}/team</a> to see booked slots, call clients and log follow-ups. They cannot change settings, cancel or delete bookings.</p>
       <TeamEditor team={data.team || []} busy={!!busy} onSave={t => post('/api/admin/team', t, 'team')}/>
     </div>
 
