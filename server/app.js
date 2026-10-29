@@ -187,7 +187,11 @@ function eventBody(b, settings, referrer) {
   const lines = [`Service: ${b.service_name}`, `Meeting: ${MODES[b.mode]}`, '', `Client: ${b.client_name}`, `Phone: ${b.client_phone}`, `Email: ${b.client_email}`,
     b.client_institution ? `Institution: ${b.client_institution}` : null, `Referred by: ${referrer}`, b.client_note ? `\nClient note:\n${b.client_note}` : null,
     '', `Booking ID: ${b.id}`, 'Booked via Brilliancy Appointments'].filter(v => v !== null);
-  const body = { id: eventId(b.id), summary: `${b.service_name} — ${b.client_name}`, description: lines.join('\n'),
+  const h = (v) => String(v ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const html = [`<b>Service:</b> ${h(b.service_name)}`, `<b>Meeting:</b> ${h(MODES[b.mode])}`, '', `<b>Client:</b> ${h(b.client_name)}`, `<b>Phone:</b> ${h(b.client_phone)}`,
+    `<b>Email:</b> ${h(b.client_email)}`, b.client_institution ? `<b>Institution:</b> ${h(b.client_institution)}` : null, `<b>Referred by:</b> ${h(referrer)}`,
+    b.client_note ? `<br><b>Client note:</b><br>${h(b.client_note).replace(/\n/g, '<br>')}` : null, '', `<small>Booking ID: ${h(b.id)} · Brilliancy Appointments</small>`].filter(v => v !== null);
+  const body = { id: eventId(b.id), summary: `${b.service_name} — ${b.client_name}`, description: html.join('<br>'),
     start: { dateTime: b.start_at, timeZone: ZONE }, end: { dateTime: b.end_at, timeZone: ZONE },
     attendees: [{ email: b.client_email, displayName: b.client_name }],
     location: b.mode === 'office' ? settings.office_address : b.mode === 'phone' ? `Phone call: ${b.client_phone}` : undefined,
@@ -207,7 +211,7 @@ async function syncCreate(db, env, b, settings) {
   try { token = await googleAccessToken(db, env); } catch (e) { await noteCalendarError(db, b.id, e.message); return false; }
   if (!token) { await noteCalendarError(db, b.id, 'Office Google Calendar is not connected.'); return false; }
   const path = `calendars/${encodeURIComponent(settings.calendar_id)}/events`;
-  let res = await gcal(token, `${path}?sendUpdates=all&conferenceDataVersion=1`, { method: 'POST', body: eventBody(b, settings, await referrerLabel(db, b)) });
+  let res = await gcal(token, `${path}?sendUpdates=none&conferenceDataVersion=1`, { method: 'POST', body: eventBody(b, settings, await referrerLabel(db, b)) });
   if (res.status === 409) res = await gcal(token, `${path}/${eventId(b.id)}`);
   if (!res.ok || !res.data?.id) { await noteCalendarError(db, b.id, `Google Calendar HTTP ${res.status}: ${res.data?.error?.message || 'unknown error'}`); return false; }
   await db.q(`UPDATE appt_bookings SET status = 'confirmed', google_event_id = ?, meet_link = ?, calendar_error = NULL, updated_at = CURRENT_TIMESTAMP(3) WHERE id = ? AND status = 'calendar_pending'`,
@@ -219,7 +223,7 @@ async function syncDelete(db, env, b, settings) {
   try {
     const token = await googleAccessToken(db, env);
     if (!token) return false;
-    const res = await gcal(token, `calendars/${encodeURIComponent(settings.calendar_id)}/events/${encodeURIComponent(b.google_event_id)}?sendUpdates=all`, { method: 'DELETE' });
+    const res = await gcal(token, `calendars/${encodeURIComponent(settings.calendar_id)}/events/${encodeURIComponent(b.google_event_id)}?sendUpdates=none`, { method: 'DELETE' });
     if (!res.ok && res.status !== 404 && res.status !== 410) { await noteCalendarError(db, b.id, `Google delete HTTP ${res.status}`); return false; }
     await db.q('UPDATE appt_bookings SET google_event_id = NULL, calendar_error = NULL WHERE id = ?', [b.id]);
     return true;
@@ -239,6 +243,7 @@ function brevoSend(env, settings, job, b, c) {
     headers: { 'api-key': env.BREVO_API_KEY, 'Content-Type': 'application/json', Accept: 'application/json' },
     body: JSON.stringify({ sender: { name: env.BREVO_SENDER_NAME || 'Brilliancy Research', email: env.BREVO_SENDER_EMAIL },
       to: [{ email: job.to_email, name: job.to_name || undefined }], subject: c.subject, textContent: c.text, htmlContent: c.html,
+      ...(c.ics ? { attachment: [{ name: 'appointment.ics', content: Buffer.from(c.ics).toString('base64') }] } : {}),
       replyTo: job.kind === 'admin_alert' ? { email: b.client_email, name: b.client_name } : { email: settings.notify_email },
       headers: { idempotencyKey: job.idem_key } }) });
 }

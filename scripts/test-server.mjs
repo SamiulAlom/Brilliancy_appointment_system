@@ -23,13 +23,14 @@ const settingsRow = await db.one('SELECT office_address FROM appt_settings');
 assert.equal(settingsRow.office_address, 'Level 13, Fareast Tower, 35 Topkhana Road, Dhaka 1000'); ok('default office address is the new one');
 
 // mocks
-const state = { events: [], mails: [], busy: [], deleted: [] };
+const state = { events: [], mails: [], busy: [], deleted: [], gcalUrls: [] };
 globalThis.fetch = async (input, init = {}) => {
   const url = new URL(typeof input === 'string' ? input : input.url); const method = init.method || 'GET';
   const body = typeof init.body === 'string' ? JSON.parse(init.body) : init.body;
   const reply = (d, s = 200) => new Response(d === null ? null : JSON.stringify(d), { status: s, headers: { 'Content-Type': 'application/json' } });
   if (url.host === 'oauth2.googleapis.com') return reply({ access_token: 'ya29.test', expires_in: 3600 });
   if (url.host === 'www.googleapis.com') {
+    state.gcalUrls.push(method + ' ' + url.search);
     if (url.pathname.endsWith('/freeBusy')) return reply({ calendars: { primary: { busy: state.busy } } });
     if (method === 'POST') { state.events.push(body); return reply({ ...body, hangoutLink: body.conferenceData ? 'https://meet.google.com/abc-defg-hij' : undefined }); }
     if (method === 'DELETE') { state.deleted.push(url.pathname); return new Response(null, { status: 204 }); }
@@ -88,7 +89,7 @@ assert.equal(bk.status, 201, JSON.stringify(bk.json));
 const row = await db.one('SELECT * FROM appt_bookings WHERE client_email = ?', ['client@example.com']);
 assert.equal(row.status, 'confirmed'); assert.equal(row.client_phone, '01711000000'); assert.equal(row.referrer_code, 'BR21510926'); assert.equal(row.meet_link, 'https://meet.google.com/abc-defg-hij');
 assert.equal(new Date(row.start_at).toISOString(), form.start); ok('booking stored in UTC, confirmed on calendar with Meet link');
-assert.equal(state.events[0].id, eventId(row.id)); assert.match(state.events[0].description, /Referred by: Aziz Ahmed \(BR21510926\)/); ok('Google event created with deterministic ID and referrer');
+assert.equal(state.events[0].id, eventId(row.id)); assert.match(state.events[0].description, /<b>Referred by:<\/b> Aziz Ahmed \(BR21510926\)/); ok('Google event created with deterministic ID and referrer');
 await Promise.all(waits);
 assert.equal(state.mails.length, 3); assert.ok(state.mails.some(m => m.subject.startsWith('Appointment confirmed') && m.textContent.includes('https://appointment.example.com/manage?token=' + bk.json.manage_token)));
 ok('confirmation, office alert and referrer alert emails sent');
@@ -148,6 +149,14 @@ const pend = await db.one('SELECT status FROM appt_bookings WHERE id = ?', [pend
 assert.equal(pend.status, 'confirmed'); ok('cron retries calendar-pending bookings');
 const rem = await db.q(`SELECT * FROM appt_email_outbox WHERE kind = 'reminder' AND booking_id = ?`, [pendingId]);
 assert.equal(rem.length, 1); assert.equal(rem[0].status, 'accepted'); ok('cron queues and sends ~24h reminders');
+
+// only our branded emails reach clients: Google sends no plain invitation, the confirmation carries an .ics and a Google Calendar link
+assert.ok(state.gcalUrls.filter(u => /^(POST|DELETE) .*sendUpdates/.test(u)).every(u => u.includes('sendUpdates=none')) && state.gcalUrls.some(u => u.startsWith('POST') && u.includes('sendUpdates=none')));
+const conf = state.mails.find(m => m.subject.startsWith('Appointment confirmed'));
+const ics = Buffer.from(conf.attachment[0].content, 'base64').toString();
+assert.equal(conf.attachment[0].name, 'appointment.ics'); assert.match(ics, /BEGIN:VEVENT[\s\S]*DTSTART:\d{8}T\d{6}Z[\s\S]*END:VCALENDAR/);
+assert.ok(conf.htmlContent.includes('calendar.google.com/calendar/render?action=TEMPLATE'));
+assert.ok(state.events[0].description.includes('<b>Client:</b>')); ok('no Google invitation emails; confirmation has Add-to-calendar link and .ics');
 
 // branded HTML emails
 assert.ok(state.mails.length && state.mails.every(m => m.htmlContent && m.htmlContent.includes('/brand/email-logo.jpg') && m.textContent)); ok('emails are branded HTML cards with a text version');

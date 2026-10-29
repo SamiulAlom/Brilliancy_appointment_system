@@ -11,7 +11,7 @@ const fmtWhen = (iso) => fmt(iso, { weekday: 'long', day: 'numeric', month: 'lon
 const fmtDate = (iso) => fmt(iso, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
 const fmtTime = (iso) => fmt(iso, { hour: 'numeric', minute: '2-digit', hour12: true });
 
-function card({ site, preheader, badge, badgeColor = RED, title, greeting, intro, rows, button, secondary, note, footerAddress }) {
+function card({ site, preheader, badge, badgeColor = RED, title, greeting, intro, rows, button, secondary, calendar, note, footerAddress }) {
   const logo = `${site}/brand/email-logo.jpg`;
   const rowHtml = rows.filter(r => r && r[1]).map(([label, value, link], i) => `
               <tr>
@@ -54,6 +54,9 @@ function card({ site, preheader, badge, badgeColor = RED, title, greeting, intro
             </td></tr>
           </table>
         </td></tr>${btn}
+        ${calendar ? `<tr><td style="padding:12px 32px 0;font:500 13px/1.6 ${FONT};color:${MUTED};">&#128197; Add to your calendar:
+          <a href="${esc(calendar.google)}" style="color:${RED};font-weight:600;text-decoration:none;">Google Calendar</a>
+          &nbsp;·&nbsp; Outlook / Apple: open the attached <b>appointment.ics</b></td></tr>` : ''}
         ${note ? `<tr><td style="padding:14px 32px 0;font:400 13px/1.6 ${FONT};color:${MUTED};">${esc(note).replace(/\n/g, '<br>')}</td></tr>` : ''}
         <tr><td style="padding:28px 32px 26px;">
           <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border-top:1px solid ${LINE};"><tr>
@@ -70,10 +73,32 @@ function card({ site, preheader, badge, badgeColor = RED, title, greeting, intro
 </body></html>`;
 }
 
-const textOf = ({ greeting, intro, rows, button, secondary, note, footerAddress }) =>
+const textOf = ({ greeting, intro, rows, button, secondary, calendar, note, footerAddress }) =>
   [greeting, intro, '', ...rows.filter(r => r && r[1]).map(([l, v]) => `${l}: ${v}`), '',
     button ? `${button.label}: ${button.url}` : null, secondary ? `${secondary.label}: ${secondary.url}` : null,
+    calendar ? `Add to Google Calendar: ${calendar.google}` : null,
     note ? `\n${note}` : null, '', 'Brilliancy Research', footerAddress].filter(v => v !== null).join('\n');
+
+// "Add to calendar": a Google Calendar link and an .ics file (Outlook, Apple, any calendar app).
+const icsTime = (iso) => new Date(iso).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
+const icsEsc = (v) => String(v ?? '').replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n');
+function eventText(b, settings, manageUrl) {
+  return [`Service: ${b.service_name}`, b.mode === 'meet' ? `Google Meet: ${b.meet_link || 'link in your confirmation email'}` : b.mode === 'phone' ? `We will call you on ${b.client_phone}` : `Venue: Brilliancy Research, ${settings.office_address}`,
+    manageUrl ? `View or cancel: ${manageUrl}` : null].filter(Boolean).join('\n');
+}
+const eventLocation = (b, settings) => b.mode === 'office' ? `Brilliancy Research, ${settings.office_address}` : b.mode === 'meet' ? (b.meet_link || 'Google Meet') : 'Phone call';
+export function calendarLinks(b, settings, manageUrl) {
+  const p = new URLSearchParams({ action: 'TEMPLATE', text: `${b.service_name} — Brilliancy Research`, dates: `${icsTime(b.start_at)}/${icsTime(b.end_at)}`,
+    details: eventText(b, settings, manageUrl), location: eventLocation(b, settings), ctz: ZONE });
+  return { google: `https://calendar.google.com/calendar/render?${p}` };
+}
+export function icsFile(b, settings, manageUrl) {
+  const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Brilliancy Research//Appointments//EN', 'METHOD:PUBLISH', 'BEGIN:VEVENT',
+    `UID:${b.id}@brilliancy-appointments`, `DTSTAMP:${icsTime(new Date().toISOString())}`, `DTSTART:${icsTime(b.start_at)}`, `DTEND:${icsTime(b.end_at)}`,
+    `SUMMARY:${icsEsc(`${b.service_name} — Brilliancy Research`)}`, `DESCRIPTION:${icsEsc(eventText(b, settings, manageUrl))}`, `LOCATION:${icsEsc(eventLocation(b, settings))}`,
+    ...(manageUrl ? [`URL:${manageUrl}`] : []), 'BEGIN:VALARM', 'TRIGGER:-PT1H', 'ACTION:DISPLAY', 'DESCRIPTION:Appointment with Brilliancy Research', 'END:VALARM', 'END:VEVENT', 'END:VCALENDAR'];
+  return lines.join('\r\n') + '\r\n';
+}
 
 // kind: confirmation | reminder | cancellation | admin_alert | referrer_alert. forAdmin: the copy goes to the office.
 export function emailContent(kind, b, settings, env, forAdmin = false) {
@@ -92,6 +117,7 @@ export function emailContent(kind, b, settings, env, forAdmin = false) {
     rows: [['Service', b.service_name], ...timeRows, meeting, ['Booking ref', b.id.slice(0, 8).toUpperCase()]],
     button: manageUrl && { label: 'View or cancel booking', url: manageUrl },
     secondary: b.mode === 'meet' && b.meet_link ? { label: 'Join Google Meet', url: b.meet_link } : null,
+    calendar: calendarLinks(b, settings, manageUrl), ics: icsFile(b, settings, manageUrl),
     note: 'Need a different time? Cancel with the button above and book a new slot. You can reply to this email with any questions.' };
   else if (kind === 'reminder') m = { subject: `Reminder: your appointment on ${fmtWhen(b.start_at)}`, badge: 'Reminder', badgeColor: '#ef6c00',
     greeting: `Dear ${b.client_name},`, title: 'See you soon',
@@ -119,7 +145,7 @@ export function emailContent(kind, b, settings, env, forAdmin = false) {
       ['Institution', b.client_institution], ['Service', b.service_name], ...timeRows, ['Meeting', MODES[b.mode]], ['Referred by', b._referrer], ['Client note', b.client_note]],
     button: { label: 'Open admin', url: `${site}/admin` } };
   const parts = { ...base, ...m, preheader: `${m.title} — ${fmtWhen(b.start_at)}` };
-  return { subject: m.subject, text: textOf(parts), html: card(parts) };
+  return { subject: m.subject, text: textOf(parts), html: card(parts), ics: m.ics || null };
 }
 
 // Password reset link for a team member or administrator.
