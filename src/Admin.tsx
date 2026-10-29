@@ -1,16 +1,21 @@
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react';
-import { BarChart3, CalendarDays, Copy, History, Link2, LogOut, MessageCircle, RefreshCw, Settings2, Trash2, Users } from 'lucide-react';
+import { BarChart3, CalendarDays, Copy, History, Link2, LogOut, MessageCircle, Phone, RefreshCw, Settings2, Trash2, Users } from 'lucide-react';
 import Analytics from './Analytics';
+import { FOLLOW, OUTCOME } from './Team';
 import Brand from './Brand';
+import SignIn from './SignIn';
 import { api, type Mode, type OffDay, type Service } from './lib/api';
 import { addDays, DAY_NAMES, dhakaDate, fmtDateTime } from './lib/time';
 
 type Booking = { id: string; service_name: string; duration_min: number; mode: Mode; start_at: string; end_at: string; status: string; client_name: string; client_phone: string; client_email: string;
-  client_institution: string; client_note: string; referrer_label: string; referrer_code: string | null; referrer_source: string; meet_link: string | null; calendar_error: string | null; internal_note: string; created_at: string };
+  client_institution: string; client_note: string; referrer_label: string; referrer_code: string | null; referrer_source: string; meet_link: string | null; calendar_error: string | null; internal_note: string; created_at: string;
+  follow_status?: string; follow_up_at?: string | null; last_contact_at?: string | null; assigned_to?: string | null };
 type Referrer = { code: string; full_name: string; designation: string; email: string | null; phone: string; notify: boolean; active: boolean };
 type AdminRow = { id: string; email: string; full_name: string; active: boolean };
 type SettingsPayload = { settings: Record<string, unknown> & { open_time: string; close_time: string; working_days: number[]; slot_step_min: number; min_notice_min: number; max_days_ahead: number; modes: Mode[]; office_address: string; calendar_id: string; notify_email: string };
-  services: Service[]; off_days: OffDay[]; google: { connected: boolean; email: string | null; connected_at: string | null; last_ok_at: string | null; last_error: string | null; redirect_uri: string }; referrers: Referrer[]; admins?: AdminRow[] };
+  services: Service[]; off_days: OffDay[]; google: { connected: boolean; email: string | null; connected_at: string | null; last_ok_at: string | null; last_error: string | null; redirect_uri: string }; referrers: Referrer[]; admins?: AdminRow[]; team?: TeamRow[] };
+type TeamRow = { id: string; email: string; full_name: string; phone: string | null; active: boolean; last_login_at: string | null };
+type Activity = { id: number; actor_type: string; actor_name: string; outcome: string | null; follow_status: string | null; follow_up_at: string | null; note: string | null; created_at: string };
 type ReportRow = { referrer_code: string | null; full_name: string | null; referrer_label: string; total: number; upcoming: number; completed: number; no_show: number; cancelled: number };
 type Tab = 'bookings' | 'analytics' | 'referrals' | 'settings';
 const STATUS: Record<string, string> = { calendar_pending: 'Calendar pending', confirmed: 'Confirmed', completed: 'Completed', no_show: 'No-show', cancelled: 'Cancelled' };
@@ -39,27 +44,11 @@ export default function Admin() {
   }, [token]);
   if (needsSetup === null) return null;
   if (needsSetup && !token) return <Setup onDone={t => { setNeedsSetup(false); setToken(t); }}/>;
-  if (!token || !admin) return <Login error={authError} onError={setAuthError} onToken={setToken}/>;
+  if (!token || !admin) return <SignIn initial="admin" error={authError} onToken={(_r, t) => setToken(t)}/>;
   return <Portal token={token} admin={admin} signOut={() => setToken(null)}/>;
 }
 
 function Shell({ children }: { children: ReactNode }) { return <div className="done-shell"><Brand caption="Appointments admin"/><div className="ticket">{children}</div></div>; }
-
-function Login({ error, onError, onToken }: { error: string; onError: (e: string) => void; onToken: (t: string) => void }) {
-  const [u, setU] = useState(''); const [p, setP] = useState(''); const [busy, setBusy] = useState(false);
-  async function submit(e: FormEvent) {
-    e.preventDefault(); setBusy(true); onError('');
-    try { onToken((await api<{ access_token: string }>('/api/auth/login', { method: 'POST', body: JSON.stringify({ username: u, password: p }) })).access_token); }
-    catch (err) { onError((err as Error).message); } finally { setBusy(false); }
-  }
-  return <Shell><h1>Administrator sign-in</h1><p className="muted">Use the administrator email and password for this booking system.</p>
-    <form onSubmit={submit} className="fields one">
-      <label>Email<input type="email" autoComplete="username" value={u} onChange={e => setU(e.target.value)} required/></label>
-      <label>Password<input type="password" autoComplete="current-password" value={p} onChange={e => setP(e.target.value)} required/></label>
-      {error && <p className="alert" role="alert">{error}</p>}
-      <button className="primary" disabled={busy}>{busy ? 'Signing in…' : 'Sign in'}</button>
-    </form></Shell>;
-}
 
 function Setup({ onDone }: { onDone: (token: string) => void }) {
   const [f, setF] = useState({ setup_code: '', full_name: '', email: '', password: '', confirm: '' }); const [busy, setBusy] = useState(false); const [error, setError] = useState('');
@@ -136,8 +125,8 @@ function Bookings({ token }: { token: string }) {
     {!!shown.length && <div className="table-wrap"><table>
       <thead><tr><th>When</th><th>Client</th><th>Service</th><th>Meeting</th><th>Referred by</th><th>Status</th></tr></thead>
       <tbody>{shown.map(b => <tr key={b.id} onClick={() => setOpen(b)} tabIndex={0} onKeyDown={e => e.key === 'Enter' && setOpen(b)}>
-        <td>{fmtDateTime(b.start_at)}</td><td><strong>{b.client_name}</strong><br/><small>{b.client_phone}</small></td><td>{b.service_name}</td><td>{MODE[b.mode]}</td><td>{b.referrer_label}</td>
-        <td><span className={`pill ${b.status}`}>{STATUS[b.status]}</span>{b.calendar_error && <small className="warn" title={b.calendar_error}>Calendar issue</small>}</td>
+        <td>{fmtDateTime(b.start_at)}</td><td><strong>{b.client_name}</strong><br/><small>{b.client_phone}</small></td><td>{b.service_name}</td><td>{MODE[b.mode]}</td><td><b>{b.referrer_label}</b></td>
+        <td><span className={`pill ${b.status}`}>{STATUS[b.status]}</span>{b.follow_status && b.status !== 'cancelled' && <> <span className={`pill f-${b.follow_status}`}>{FOLLOW[b.follow_status]}</span></>}{b.calendar_error && <small className="warn" title={b.calendar_error}>Calendar issue</small>}</td>
       </tr>)}</tbody></table></div>}
     {open && <BookingDrawer token={token} booking={open} onClose={() => setOpen(null)} onSaved={b => { setRows(rows => rows?.map(x => x.id === b.id ? { ...x, ...b } : x) || null); setOpen(o => o && { ...o, ...b }); }}
       onDeleted={id => { setRows(rows => rows?.filter(x => x.id !== id) || null); setOpen(null); }}/>}
@@ -190,6 +179,7 @@ function BookingDrawer({ token, booking: b, onClose, onSaved, onDeleted }: { tok
       {history && history.length > 1 && <><p className="small"><strong>{history.length} bookings</strong> · {history.filter(h => h.status === 'completed').length} completed · {history.filter(h => h.status === 'no_show').length} no-show</p>
         <ul className="plain small">{history.filter(h => h.id !== b.id).slice(0, 6).map(h => <li key={h.id}>{fmtDateTime(h.start_at)} · {h.service_name} <span className={`pill ${h.status}`}>{STATUS[h.status]}</span></li>)}</ul></>}
     </div>
+    <TeamLog token={token} booking={b}/>
     {b.calendar_error && <p className="alert">Google Calendar: {b.calendar_error} {b.status === 'calendar_pending' && <button className="link" disabled={!!busy} onClick={() => update({ status: 'retry_calendar' }, 'retry')}>Retry now</button>}</p>}
     <label>Internal note<textarea rows={3} value={note} onChange={e => setNote(e.target.value)}/></label>
     <button className="secondary" disabled={!!busy || note === b.internal_note} onClick={() => update({ internal_note: note }, 'note')}>{busy === 'note' ? 'Saving…' : 'Save note'}</button>
@@ -300,6 +290,12 @@ function SettingsTab({ token }: { token: string }) {
     </div>
 
     <div className="card">
+      <h2>Communication team</h2>
+      <p className="muted">People who sign in at <a href="https://appointmentbooked.brilliancyresearch.net" target="_blank" rel="noreferrer">appointmentbooked.brilliancyresearch.net</a> to see booked slots, call clients and log follow-ups. They cannot change settings, cancel or delete bookings.</p>
+      <TeamEditor team={data.team || []} busy={!!busy} onSave={t => post('/api/admin/team', t, 'team')}/>
+    </div>
+
+    <div className="card">
       <h2>Administrators</h2>
       <p className="muted">People who can sign in to this admin portal.</p>
       <AdminEditor admins={data.admins || []} busy={!!busy} onSave={a => post('/api/admin/admins', a, 'adm')}/>
@@ -392,4 +388,45 @@ function PasswordForm({ busy, onSave }: { busy: boolean; onSave: (b: { current: 
       <label>Confirm new password<input type="password" minLength={10} required autoComplete="new-password" value={f.confirm} onChange={e => setF({ ...f, confirm: e.target.value })}/></label>
     </div>{err && <p className="alert">{err}</p>}
     <button className="primary" disabled={busy}>Change password</button> <button type="button" className="link" onClick={() => setOpen(false)}>Cancel</button></form>;
+}
+
+function TeamEditor({ team, busy, onSave }: { team: TeamRow[]; busy: boolean; onSave: (t: Record<string, unknown>) => void }) {
+  const [edit, setEdit] = useState<{ email: string; full_name: string; phone: string; password: string; active: boolean; isNew: boolean } | null>(null);
+  return <>
+    {!team.length && <p className="muted small">No team members yet.</p>}
+    <ul className="plain">{team.map(t => <li key={t.id} className={t.active ? '' : 'off'}><strong>{t.full_name}</strong> · {t.email}{t.phone && <> · {t.phone}</>}
+      <small className="muted"> · {t.active ? (t.last_login_at ? `last signed in ${fmtDateTime(t.last_login_at)}` : 'never signed in') : 'inactive'}</small>
+      <button className="link" onClick={() => setEdit({ email: t.email, full_name: t.full_name, phone: t.phone || '', password: '', active: t.active, isNew: false })}>Edit</button></li>)}</ul>
+    {!edit && <button className="secondary" onClick={() => setEdit({ email: '', full_name: '', phone: '', password: '', active: true, isNew: true })}>Add team member</button>}
+    {edit && <form className="inline-form" onSubmit={e => { e.preventDefault(); onSave(edit); setEdit(null); }}><div className="fields">
+      <label>Email<input type="email" required readOnly={!edit.isNew} value={edit.email} onChange={e => setEdit({ ...edit, email: e.target.value })}/></label>
+      <label>Name<input required value={edit.full_name} onChange={e => setEdit({ ...edit, full_name: e.target.value })}/></label>
+      <label>Phone<input type="tel" value={edit.phone} onChange={e => setEdit({ ...edit, phone: e.target.value })}/></label>
+      <label>{edit.isNew ? 'Password' : 'New password (optional)'}<input type="password" minLength={10} required={edit.isNew} autoComplete="new-password" value={edit.password} onChange={e => setEdit({ ...edit, password: e.target.value })}/><small>At least 10 characters. Share it with them privately.</small></label>
+      {!edit.isNew && <label className="check self">Can sign in<input type="checkbox" checked={edit.active} onChange={e => setEdit({ ...edit, active: e.target.checked })}/></label>}
+    </div><button className="primary" disabled={busy}>Save team member</button> <button type="button" className="link" onClick={() => setEdit(null)}>Cancel</button></form>}
+  </>;
+}
+
+// Read-only view of the communication team's calls for one booking, plus a quick admin note.
+function TeamLog({ token, booking: b }: { token: string; booking: Booking }) {
+  const [log, setLog] = useState<Activity[] | null>(null); const [note, setNote] = useState(''); const [busy, setBusy] = useState(false);
+  useEffect(() => { setLog(null); api<{ activity: Activity[] }>(`/api/admin/activity?booking_id=${b.id}`, { token }).then(r => setLog(r.activity)).catch(() => setLog([])); }, [b.id, token]);
+  const add = async () => {
+    setBusy(true);
+    try { const r = await api<{ activity: Activity[] }>('/api/admin/activity', { method: 'POST', token, body: JSON.stringify({ booking_id: b.id, outcome: 'note', note }) }); setLog(r.activity); setNote(''); }
+    finally { setBusy(false); }
+  };
+  return <div className="history">
+    <h3><Phone size={15}/> Team follow-up {b.follow_status && <span className={`pill f-${b.follow_status}`}>{FOLLOW[b.follow_status]}</span>}</h3>
+    {!log && <p className="muted small">Loading…</p>}
+    {log && !log.length && <p className="muted small">No calls logged by the team yet.</p>}
+    {log && !!log.length && <ol className="timeline">{log.slice(0, 8).map(a => <li key={a.id}>
+      <div><strong>{a.actor_name}</strong> <small className="muted">· {fmtDateTime(a.created_at)}</small></div>
+      <div className="tl-tags">{a.outcome && <span className="chip static">{OUTCOME[a.outcome] || a.outcome}</span>}{a.follow_status && <span className={`pill f-${a.follow_status}`}>{FOLLOW[a.follow_status]}</span>}
+        {a.follow_up_at && <small>Call back {fmtDateTime(a.follow_up_at)}</small>}</div>
+      {a.note && <p>{a.note}</p>}</li>)}</ol>}
+    <div className="add-note"><input placeholder="Add a note for the team…" value={note} maxLength={2000} onChange={e => setNote(e.target.value)}/>
+      <button className="secondary" disabled={busy || !note.trim()} onClick={add}>Add</button></div>
+  </div>;
 }

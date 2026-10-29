@@ -21,6 +21,13 @@ const SERVICES = [
   ['GIS / spatial analysis consultancy', 'Mapping, spatial analysis and GIS-based research.', 45, 70],
 ];
 
+const COLUMNS = [
+  ['appt_bookings', 'follow_status', "VARCHAR(20) NOT NULL DEFAULT 'new'"],
+  ['appt_bookings', 'follow_up_at', 'DATETIME(3) NULL'],
+  ['appt_bookings', 'assigned_to', 'CHAR(36) NULL'],
+  ['appt_bookings', 'last_contact_at', 'DATETIME(3) NULL'],
+];
+
 export async function openDatabase(url = env.DATABASE_URL) {
   if (!url) throw new Error('DATABASE_URL is not set (mysql://user:password@host:3306/database).');
   const pool = mysql.createPool({ uri: url, timezone: 'Z', connectionLimit: 8, waitForConnections: true, charset: 'utf8mb4' });
@@ -29,6 +36,10 @@ export async function openDatabase(url = env.DATABASE_URL) {
   try {
     await conn.query("SET time_zone = '+00:00'");
     for (const sql of schema.split(/;\s*\n/).map(s => s.replace(/^\s*--.*$/gm, '').trim()).filter(Boolean)) await conn.query(sql);
+    for (const [table, column, type] of COLUMNS) {   // columns added after the first release
+      const [[{ c }]] = await conn.query('SELECT COUNT(*) AS c FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?', [table, column]);
+      if (!Number(c)) await conn.query(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+    }
     const [[{ n }]] = await conn.query('SELECT COUNT(*) AS n FROM appt_services');
     if (!Number(n)) for (const s of SERVICES) await conn.query('INSERT INTO appt_services (id, name, description, duration_min, sort_order) VALUES (?, ?, ?, ?, ?)', [randomUUID(), ...s]);
   } finally { conn.release(); }

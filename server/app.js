@@ -121,6 +121,7 @@ function mapSettings(s) {
 function mapBooking(b) {
   if (!b) return b;
   return { ...b, start_at: iso(b.start_at), end_at: iso(b.end_at), created_at: iso(b.created_at), updated_at: iso(b.updated_at), cancelled_at: iso(b.cancelled_at),
+    follow_up_at: iso(b.follow_up_at), last_contact_at: iso(b.last_contact_at), follow_status: b.follow_status || 'new',
     client_note: b.client_note || '', internal_note: b.internal_note || '' };
 }
 const mapOff = (o) => ({ id: o.id, from_date: ymd(o.from_date), to_date: ymd(o.to_date), reason: o.reason });
@@ -466,6 +467,125 @@ async function saveAdmin(db, admin, body) {
   return { ok: true };
 }
 
+
+// ---------------------------------------------------------------- communication team
+// Team members sign in to a separate portal. They can see bookings and log calls / tasks,
+// but cannot change settings, cancel or delete. Sessions are signed with a different prefix
+// from admin sessions, so one can never be used as the other.
+const FOLLOW = { new: 'To call', called: 'Contacted', no_answer: 'No answer', follow_up: 'Call back', done: 'Done' };
+const OUTCOMES = { reached: 'Spoke with client', no_answer: 'No answer', busy: 'Busy / call later', wrong_number: 'Wrong number', whatsapp: 'Messaged on WhatsApp', email: 'Sent an email', note: 'Note' };
+async function issueTeamSession(env, id) {
+  const payload = b64url(enc.encode(JSON.stringify({ t: id, e: Date.now() + SESSION_HOURS * 3600e3 })));
+  return payload + '.' + await sign(env, 'team:' + payload);
+}
+async function authTeam(db, env, header) {
+  const m = /^Bearer ([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)$/.exec(header || '');
+  if (!m || !(await verifySig(env, 'team:' + m[1], m[2]))) fail(401, 'SIGN_IN_REQUIRED', 'Please sign in.');
+  let s; try { s = JSON.parse(Buffer.from(m[1], 'base64url').toString()); } catch { fail(401, 'SIGN_IN_REQUIRED', 'Please sign in.'); }
+  if (!(s.e > Date.now())) fail(401, 'SESSION_EXPIRED', 'Your session has expired. Please sign in again.');
+  const member = await db.one('SELECT id, full_name, email, phone FROM appt_team WHERE id = ? AND active = 1', [s.t]);
+  if (!member) fail(403, 'TEAM_REQUIRED', 'Your team account is not active. Ask an administrator.');
+  return member;
+}
+async function teamLogin(db, env, body, ip) {
+  limit('team-login:' + ip, 10, 15 * 60e3);
+  const email = typeof body.username === 'string' ? body.username.trim().toLowerCase() : '';
+  if (!EMAIL.test(email) || typeof body.password !== 'string' || !body.password || body.password.length > 256) fail(400, 'INVALID_LOGIN', 'Enter your email address and password.');
+  const t = await db.one('SELECT id, password_hash FROM appt_team WHERE email = ? AND active = 1', [email]);
+  const good = await checkPassword(body.password, t?.password_hash);
+  if (!t || !good) fail(401, 'INVALID_CREDENTIALS', 'Invalid email or password.');
+  await db.q('UPDATE appt_team SET last_login_at = CURRENT_TIMESTAMP(3) WHERE id = ?', [t.id]);
+  return { access_token: await issueTeamSession(env, t.id) };
+}
+// What the team sees: contact details and booking facts, never admin-only notes or tokens.
+function teamView(b, refs, team) {
+  return { id: b.id, start_at: b.start_at, end_at: b.end_at, duration_min: b.duration_min, service_name: b.service_name, mode: b.mode, meet_link: b.meet_link,
+    status: b.status, client_name: b.client_name, client_phone: b.client_phone, client_email: b.client_email, client_institution: b.client_institution,
+    client_note: b.client_note, created_at: b.created_at,
+    referrer_label: b.referrer_source === 'other' ? `Other: ${b.referrer_other}` : b.referrer_code ? (refs[b.referrer_code]?.full_name || b.referrer_code) : 'No one',
+    follow_status: b.follow_status, follow_up_at: b.follow_up_at, last_contact_at: b.last_contact_at,
+    assigned_to: b.assigned_to, assigned_name: b.assigned_to ? (team[b.assigned_to]?.full_name || 'Former member') : null };
+}
+async function teamLookups(db) {
+  const [refs, team] = await Promise.all([db.q('SELECT code, full_name FROM appt_referrers'), db.q('SELECT id, full_name, active FROM appt_team ORDER BY full_name')]);
+  return { refs: Object.fromEntries(refs.map(r => [r.code, r])), team: Object.fromEntries(team.map(t => [t.id, t])), members: team.filter(t => bool(t.active)).map(t => ({ id: t.id, full_name: t.full_name })) };
+}
+async function teamBookings(db, url) {
+  const { refs, team, members } = await teamLookups(db);
+  let rows;
+  if (url.searchParams.get('view') === 'due') {
+    // Everything that still needs a call: upcoming bookings not yet contacted, plus call-backs that are due.
+    rows = await db.q(`SELECT * FROM appt_bookings WHERE status IN (?) AND (
+        (follow_status IN ('new','no_answer') AND end_at > ?) OR (follow_status = 'follow_up' AND (follow_up_at IS NULL OR follow_up_at <= ?)))
+      ORDER BY COALESCE(follow_up_at, start_at) LIMIT 500`, [[...ACTIVE, 'completed', 'no_show'], sqlTime(Date.now()), sqlTime(Date.now() + 86400e3)]);
+  } else {
+    const { from, to } = dateRange(url);
+    rows = await db.q('SELECT * FROM appt_bookings WHERE start_at >= ? AND start_at < ? ORDER BY start_at LIMIT 2000', [sqlTime(at(from, '00:00')), sqlTime(at(to, '00:00') + 86400e3)]);
+  }
+  return { bookings: rows.map(mapBooking).map(b => teamView(b, refs, team)), members, follow_labels: FOLLOW, outcome_labels: OUTCOMES };
+}
+async function activityFor(db, bookingId) {
+  if (!UUID.test(bookingId || '')) fail(400, 'INVALID_INPUT', 'Unknown booking.');
+  const rows = await db.q('SELECT id, actor_type, actor_name, outcome, follow_status, follow_up_at, note, created_at FROM appt_activity WHERE booking_id = ? ORDER BY created_at DESC, id DESC LIMIT 200', [bookingId]);
+  return { activity: rows.map(r => ({ ...r, follow_up_at: iso(r.follow_up_at), created_at: iso(r.created_at) })) };
+}
+// One call / task update: optional outcome, note, new follow-up status, call-back time and assignment, logged as one entry.
+async function logActivity(db, actor, body) {
+  if (!UUID.test(body.booking_id || '')) fail(400, 'INVALID_INPUT', 'Unknown booking.');
+  const b = await getBooking(db, body.booking_id);
+  if (!b) fail(404, 'NOT_FOUND', 'Booking not found. It may have been deleted.');
+  const outcome = body.outcome ? (OUTCOMES[body.outcome] ? body.outcome : fail(400, 'INVALID_INPUT', 'Unknown call outcome.')) : null;
+  const status = body.follow_status ? (FOLLOW[body.follow_status] ? body.follow_status : fail(400, 'INVALID_INPUT', 'Unknown follow-up status.')) : null;
+  const note = str(body.note, 2000, { name: 'note' }) || null;
+  let followAt;   // undefined = unchanged, null = clear
+  if (body.follow_up_at === null || body.follow_up_at === '') followAt = null;
+  else if (body.follow_up_at !== undefined) { const t = Date.parse(body.follow_up_at); if (!Number.isFinite(t)) fail(400, 'INVALID_INPUT', 'Check the call-back time.'); followAt = t; }
+  let assign;     // undefined = unchanged
+  if (body.assign === 'me' && actor.type === 'team') assign = actor.id;
+  else if (body.assign === 'none') assign = null;
+  else if (body.assign !== undefined) { const m = await db.one('SELECT id FROM appt_team WHERE id = ? AND active = 1', [String(body.assign)]); if (!m) fail(400, 'INVALID_INPUT', 'Unknown team member.'); assign = m.id; }
+  if (!outcome && !status && !note && followAt === undefined && assign === undefined) fail(400, 'INVALID_INPUT', 'Add a call outcome, note or status.');
+  const sets = [], vals = [];
+  const newStatus = status || (outcome === 'reached' ? 'called' : outcome === 'no_answer' || outcome === 'busy' ? 'no_answer' : null);
+  if (newStatus) { sets.push('follow_status = ?'); vals.push(newStatus); }
+  if (followAt !== undefined) { sets.push('follow_up_at = ?'); vals.push(followAt === null ? null : sqlTime(followAt)); }
+  else if (newStatus && newStatus !== 'follow_up') { sets.push('follow_up_at = NULL'); }
+  if (assign !== undefined) { sets.push('assigned_to = ?'); vals.push(assign); }
+  if (outcome && outcome !== 'note') sets.push('last_contact_at = CURRENT_TIMESTAMP(3)');
+  if (sets.length) await db.q(`UPDATE appt_bookings SET ${sets.join(', ')}, updated_at = CURRENT_TIMESTAMP(3) WHERE id = ?`, [...vals, b.id]);
+  const assignNote = assign === undefined ? '' : assign === null ? 'Unassigned' : `Assigned to ${(await db.one('SELECT full_name FROM appt_team WHERE id = ?', [assign]))?.full_name}`;
+  await db.q('INSERT INTO appt_activity (booking_id, actor_type, actor_id, actor_name, outcome, follow_status, follow_up_at, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    [b.id, actor.type, actor.id, actor.name, outcome, newStatus, followAt ? sqlTime(followAt) : null, [note, assignNote].filter(Boolean).join(' · ') || null]);
+  const { refs, team } = await teamLookups(db);
+  return { booking: teamView(await getBooking(db, b.id), refs, team), ...(await activityFor(db, b.id)) };
+}
+async function teamPassword(db, member, body) {
+  const t = await db.one('SELECT password_hash FROM appt_team WHERE id = ?', [member.id]);
+  if (!(await checkPassword(String(body.current || ''), t?.password_hash))) fail(403, 'INVALID_CREDENTIALS', 'Your current password is not correct.');
+  if (typeof body.password !== 'string' || body.password.length < 10) fail(400, 'WEAK_PASSWORD', 'Use a password of at least 10 characters.');
+  await db.q('UPDATE appt_team SET password_hash = ? WHERE id = ?', [await hashPassword(body.password), member.id]);
+  return { ok: true };
+}
+async function saveTeamMember(db, admin, body) {
+  const email = str(body.email, 200, { min: 5, name: 'email' }).toLowerCase();
+  if (!EMAIL.test(email)) fail(400, 'INVALID_INPUT', 'Enter a valid email address.');
+  const name = str(body.full_name, 120, { min: 2, name: 'name' });
+  const phone = str(body.phone, 30, { name: 'phone' }) || null;
+  const existing = await db.one('SELECT id FROM appt_team WHERE email = ?', [email]);
+  if (existing) {
+    await db.q('UPDATE appt_team SET full_name = ?, phone = ?, active = ? WHERE id = ?', [name, phone, body.active === false ? 0 : 1, existing.id]);
+    if (typeof body.password === 'string' && body.password) {
+      if (body.password.length < 10) fail(400, 'WEAK_PASSWORD', 'Use a password of at least 10 characters.');
+      await db.q('UPDATE appt_team SET password_hash = ? WHERE id = ?', [await hashPassword(body.password), existing.id]);
+    }
+  } else {
+    if (typeof body.password !== 'string' || body.password.length < 10) fail(400, 'WEAK_PASSWORD', 'Give the team member a password of at least 10 characters.');
+    await db.q('INSERT INTO appt_team (id, email, full_name, phone, password_hash) VALUES (?, ?, ?, ?, ?)', [randomUUID(), email, name, phone, await hashPassword(body.password)]);
+  }
+  await audit(db, admin.id, 'team_save', null, { email });
+  return { ok: true };
+}
+
 // ---------------------------------------------------------------- admin routes
 function dateRange(url) {
   const from = url.searchParams.get('from'), to = url.searchParams.get('to');
@@ -518,6 +638,7 @@ async function adminDeleteBooking(db, env, admin, body) {
     emailed = !!res?.ok;
   }
   await db.q('DELETE FROM appt_email_outbox WHERE booking_id = ?', [b.id]);
+  await db.q('DELETE FROM appt_activity WHERE booking_id = ?', [b.id]);
   await db.q('DELETE FROM appt_bookings WHERE id = ?', [b.id]);
   await audit(db, admin.id, 'delete', b.id, { client: b.client_name, email: b.client_email, start_at: b.start_at, service: b.service_name, status: b.status, emailed });
   return { deleted: true, emailed };
@@ -537,10 +658,12 @@ async function adminSettings(db, env) {
   const [settings, services, offDays, google, referrers, admins] = await Promise.all([loadSettings(db), db.q('SELECT * FROM appt_services ORDER BY sort_order, name'),
     futureOffDays(db, addDays(dhakaDate(Date.now()), -30)), googleRow(db), db.q('SELECT * FROM appt_referrers ORDER BY full_name'),
     db.q('SELECT id, email, full_name, active FROM appt_admins ORDER BY full_name')]);
+  const team = await db.q('SELECT id, email, full_name, phone, active, last_login_at FROM appt_team ORDER BY full_name');
   return { settings, services: services.map(mapService), off_days: offDays,
     google: { connected: !!google.refresh_token_enc, email: google.google_email, connected_at: iso(google.connected_at), last_ok_at: iso(google.last_ok_at), last_error: google.last_error,
       redirect_uri: (env.PUBLIC_SITE_URL || '').replace(/\/$/, '') + '/api/google/callback' },
-    referrers: referrers.map(mapRef), admins: admins.map(a => ({ ...a, active: bool(a.active) })) };
+    referrers: referrers.map(mapRef), admins: admins.map(a => ({ ...a, active: bool(a.active) })),
+    team: team.map(t => ({ ...t, active: bool(t.active), last_login_at: iso(t.last_login_at) })) };
 }
 async function saveSettings(db, admin, b) {
   const days = Array.isArray(b.working_days) ? [...new Set(b.working_days.map(Number))] : [];
@@ -681,6 +804,18 @@ export async function handle(db, env, req, later = (p) => p.catch(() => {})) {
   if (p === '/api/auth/login') { need('POST'); return ok(await login(db, env, req.body, req.ip)); }
   if (p === '/api/auth/setup-status') { need('GET'); const c = await db.one('SELECT COUNT(*) AS n FROM appt_admins'); return ok({ needs_setup: Number(c.n) === 0 }); }
   if (p === '/api/auth/setup') { need('POST'); return ok(await setup(db, env, req.body, req.ip)); }
+  if (p === '/api/team/login') { need('POST'); return ok(await teamLogin(db, env, req.body, req.ip)); }
+  if (p.startsWith('/api/team/')) {
+    const member = await authTeam(db, env, req.headers.authorization);
+    const actor = { type: 'team', id: member.id, name: member.full_name };
+    const r = p.slice('/api/team/'.length);
+    if (r === 'me') return ok({ member });
+    if (r === 'bookings') { need('GET'); return ok(await teamBookings(db, req.url)); }
+    if (r === 'activity') { need('GET'); return ok(await activityFor(db, req.url.searchParams.get('booking_id'))); }
+    if (r === 'update') { need('POST'); return ok(await logActivity(db, actor, req.body)); }
+    if (r === 'password') { need('POST'); return ok(await teamPassword(db, member, req.body)); }
+    fail(404, 'NOT_FOUND', 'This endpoint does not exist.');
+  }
   if (p.startsWith('/api/admin/')) {
     const admin = await authAdmin(db, env, req.headers.authorization);
     const r = p.slice('/api/admin/'.length);
@@ -688,6 +823,8 @@ export async function handle(db, env, req, later = (p) => p.catch(() => {})) {
     if (r === 'bookings') { need('GET'); return ok(await adminBookings(db, req.url)); }
     if (r === 'bookings/update') { need('POST'); return ok(await adminUpdateBooking(db, env, admin, req.body, later)); }
     if (r === 'bookings/delete') { need('POST'); return ok(await adminDeleteBooking(db, env, admin, req.body)); }
+    if (r === 'activity') { if (req.method === 'GET') return ok(await activityFor(db, req.url.searchParams.get('booking_id'))); need('POST'); return ok(await logActivity(db, { type: 'admin', id: admin.id, name: admin.full_name }, req.body)); }
+    if (r === 'team') { need('POST'); return ok(await saveTeamMember(db, admin, req.body)); }
     if (r === 'client-history') { need('GET'); return ok(await clientHistory(db, req.url)); }
     if (r === 'referrals') { need('GET'); return ok(await referralReport(db, req.url)); }
     if (r === 'settings') { if (req.method === 'GET') return ok(await adminSettings(db, env)); need('POST'); return ok(await saveSettings(db, admin, req.body)); }

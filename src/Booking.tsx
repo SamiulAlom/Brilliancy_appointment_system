@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { Building2, CalendarCheck, Check, Clock3, PenLine, Phone, Video } from 'lucide-react';
 import Brand from './Brand';
+import RefPicker from './RefPicker';
 import { api, ApiError, type Mode, type PublicBooking, type PublicConfig } from './lib/api';
 import { addDays, at, fmtDay, fmtTime, weekday } from './lib/time';
 
@@ -194,14 +195,7 @@ export default function Booking() {
             <div className="wide referrer">
               {refLocked && refName
                 ? <p className="ref-locked">Referred by <strong>{refName}</strong> <button type="button" className="link" onClick={() => setRefLocked(false)}>Change</button></p>
-                : <label>Who referred you to Brilliancy Research?
-                    <select required value={refChoice} onChange={e => setRefChoice(e.target.value)}>
-                      <option value="" disabled>Choose a name</option>
-                      {config.referrers.map(r => <option key={r.code} value={r.code}>{r.name}</option>)}
-                      <option value="__other">Someone else (type the name)</option>
-                      <option value="__none">No one referred me</option>
-                    </select></label>}
-              {refChoice === '__other' && <label>Name of the person who referred you<input value={refOther} maxLength={120} onChange={e => setRefOther(e.target.value)}/></label>}
+                : <RefPicker referrers={config.referrers} choice={refChoice} other={refOther} onChange={(c, o) => { setRefChoice(c); setRefOther(o); }}/>}
             </div>
           </div>
           {siteKey && <div ref={turnstileBox} className="turnstile"/>}

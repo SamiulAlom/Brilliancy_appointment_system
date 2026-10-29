@@ -171,6 +171,43 @@ assert.equal((await call('POST', '/api/admin/bookings/delete', { id: delRow.id }
 const pastDel = await call('POST', '/api/admin/bookings/delete', { id: pendingId, notify_client: false }, T);
 assert.equal(pastDel.json.emailed, false); ok('delete without emailing the client');
 
+// communication team portal
+assert.equal((await call('POST', '/api/admin/team', { email: 'Caller@Example.com', full_name: 'Caller One', phone: '01800000000', password: 'short' }, T)).status, 400);
+assert.equal((await call('POST', '/api/admin/team', { email: 'Caller@Example.com', full_name: 'Caller One', phone: '01800000000', password: 'caller password 1' }, T)).status, 200);
+assert.equal((await call('POST', '/api/admin/team', { email: 'second.caller@example.com', full_name: 'Caller Two', password: 'caller password 2' }, T)).status, 200);
+const setTeam = (await call('GET', '/api/admin/settings', {}, T)).json.team;
+assert.equal(setTeam.length, 2); assert.ok(!('password_hash' in setTeam[0])); ok('admin creates team members');
+assert.equal((await call('POST', '/api/team/login', { username: 'caller@example.com', password: 'wrong password!' })).status, 401);
+const tl = await call('POST', '/api/team/login', { username: 'caller@example.com', password: 'caller password 1' });
+assert.equal(tl.status, 200); const TT = tl.json.access_token; ok('team member signs in');
+assert.equal((await call('GET', '/api/admin/settings', {}, TT)).status, 401); assert.equal((await call('GET', '/api/team/me', {}, T)).status, 401); ok('team and admin sessions are not interchangeable');
+assert.equal((await call('POST', '/api/admin/bookings/delete', { id: pendingId }, TT)).status, 401); ok('team cannot use admin actions');
+const dayFrom = dhakaDate(Date.now()), dayTo = dhakaDate(Date.now() + 40 * 86400e3);
+const tb = await call('GET', `/api/team/bookings?from=${dayFrom}&to=${dayTo}`, {}, TT);
+assert.equal(tb.status, 200); assert.ok(tb.json.bookings.length >= 1); assert.equal(tb.json.members.length, 2);
+const tbk = tb.json.bookings.find(b => b.status === 'confirmed');
+assert.ok(tbk.client_phone && !('internal_note' in tbk) && !('manage_token_hash' in tbk) && !('idempotency_key' in tbk)); ok('team sees bookings with contact details but no admin-only fields');
+const due1 = await call('GET', '/api/team/bookings?view=due', {}, TT);
+assert.ok(due1.json.bookings.some(b => b.id === tbk.id)); ok('new bookings appear in the to-call list');
+assert.equal((await call('POST', '/api/team/update', { booking_id: tbk.id }, TT)).status, 400);
+const u1 = await call('POST', '/api/team/update', { booking_id: tbk.id, outcome: 'no_answer', assign: 'me' }, TT);
+assert.equal(u1.json.booking.follow_status, 'no_answer'); assert.equal(u1.json.booking.assigned_name, 'Caller One'); assert.equal(u1.json.activity.length, 1);
+const later2h = new Date(Date.now() + 2 * 3600e3).toISOString();
+const u2 = await call('POST', '/api/team/update', { booking_id: tbk.id, follow_status: 'follow_up', follow_up_at: later2h, note: 'Call after <b>lunch</b>' }, TT);
+assert.equal(u2.json.booking.follow_status, 'follow_up'); assert.equal(u2.json.booking.follow_up_at, later2h); assert.equal(u2.json.activity[0].note, 'Call after <b>lunch</b>');
+assert.ok((await call('GET', '/api/team/bookings?view=due', {}, TT)).json.bookings.some(b => b.id === tbk.id)); ok('call-back due within a day stays on the to-call list');
+const u3 = await call('POST', '/api/team/update', { booking_id: tbk.id, outcome: 'reached', note: 'Confirmed, will bring documents' }, TT);
+assert.equal(u3.json.booking.follow_status, 'called'); assert.equal(u3.json.booking.follow_up_at, null); assert.ok(u3.json.booking.last_contact_at);
+assert.ok(!(await call('GET', '/api/team/bookings?view=due', {}, TT)).json.bookings.some(b => b.id === tbk.id)); ok('reaching the client logs the call and clears it from the list');
+assert.equal((await call('POST', '/api/team/update', { booking_id: tbk.id, outcome: 'teleport' }, TT)).status, 400);
+assert.equal((await call('POST', '/api/team/update', { booking_id: tbk.id, assign: crypto.randomUUID() }, TT)).status, 400); ok('team updates are validated');
+const adminLog = await call('GET', '/api/admin/activity?booking_id=' + tbk.id, {}, T);
+assert.equal(adminLog.json.activity.length, 3); assert.equal(adminLog.json.activity[2].actor_name, 'Caller One');
+assert.equal((await call('POST', '/api/admin/activity', { booking_id: tbk.id, follow_status: 'done', note: 'Handled' }, T)).json.booking.follow_status, 'done'); ok('admins see and add to the call log');
+assert.equal((await call('POST', '/api/admin/team', { email: 'caller@example.com', full_name: 'Caller One', active: false }, T)).status, 200);
+assert.equal((await call('GET', '/api/team/me', {}, TT)).status, 403);
+assert.equal((await call('POST', '/api/team/login', { username: 'caller@example.com', password: 'caller password 1' })).status, 401); ok('deactivated team member is locked out');
+
 const health = await call('GET', '/api/health');
 assert.equal(health.json.database, true); assert.equal(health.json.configured, true); ok('health check');
 await db.pool.end();

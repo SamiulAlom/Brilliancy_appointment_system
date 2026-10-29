@@ -125,3 +125,30 @@ CREATE TABLE IF NOT EXISTS appt_audit (
   detail TEXT NULL,
   created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Communication team: separate logins that can see bookings and log calls, but not change settings.
+CREATE TABLE IF NOT EXISTS appt_team (
+  id CHAR(36) NOT NULL PRIMARY KEY,
+  email VARCHAR(200) NOT NULL UNIQUE,
+  full_name VARCHAR(120) NOT NULL,
+  phone VARCHAR(30) NULL,
+  password_hash VARCHAR(255) NOT NULL,
+  active TINYINT(1) NOT NULL DEFAULT 1,
+  last_login_at DATETIME(3) NULL,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Call / task log per booking (team and admins).
+CREATE TABLE IF NOT EXISTS appt_activity (
+  id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  booking_id CHAR(36) NOT NULL,
+  actor_type VARCHAR(10) NOT NULL,
+  actor_id CHAR(36) NULL,
+  actor_name VARCHAR(120) NOT NULL,
+  outcome VARCHAR(20) NULL,
+  follow_status VARCHAR(20) NULL,
+  follow_up_at DATETIME(3) NULL,
+  note TEXT NULL,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  INDEX idx_activity_booking (booking_id, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
