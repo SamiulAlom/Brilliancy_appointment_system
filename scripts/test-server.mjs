@@ -10,7 +10,7 @@ let passed = 0; const ok = (n) => { passed++; console.log('  ✓', n); };
 
 // fresh database
 const raw = await mysql.createConnection({ uri: URL_ });
-for (const t of ['appt_admins', 'appt_settings', 'appt_services', 'appt_off_days', 'appt_referrers', 'appt_google', 'appt_bookings', 'appt_email_outbox', 'appt_audit']) await raw.query(`DROP TABLE IF EXISTS ${t}`);
+for (const t of ['appt_admins', 'appt_settings', 'appt_services', 'appt_off_days', 'appt_referrers', 'appt_google', 'appt_bookings', 'appt_email_outbox', 'appt_audit', 'appt_team', 'appt_activity']) await raw.query(`DROP TABLE IF EXISTS ${t}`);
 await raw.end();
 const db = await openDatabase(URL_);
 await (await openDatabase(URL_)).pool.end(); // migrations are idempotent
